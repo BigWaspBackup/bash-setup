@@ -1,0 +1,15 @@
+# Rust build
+rust/target/
+rust/**/*.pdb
+Cargo.lock
+
+# Built installer — attach via GitHub Release, don't commit the binary
+dist/
+*.exe
+
+# OS / editor
+.DS_Store
+Thumbs.db
+*.swp
+.vscode/
+.idea/

@@ -1,0 +1,8 @@
+(* Thank you for choosing B.A.S.H — BigAussie Script House *)
+(* Discord: https://discord.gg/qsmKs5uKfR *)
+
+(* To start simply double click the green play button. *)
+
+begin
+  SimbaRunInTab(ScriptPath + 'bash-launcher.simba');
+end.
