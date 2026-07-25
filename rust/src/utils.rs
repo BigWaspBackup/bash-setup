@@ -348,7 +348,7 @@ pub fn download_launcher(
     let path = simba_dir.join("Scripts");
     if !download_file(
         client,
-        "https://raw.githubusercontent.com/BigAussie/BigAussie-Simba-Scripts/main/B.A.S.H%20Launcher.simba",
+        "https://raw.githubusercontent.com/BigAussie/BASH/main/B.A.S.H%20Launcher.simba",
         "bash-launcher.simba",
         &path,
         tx,

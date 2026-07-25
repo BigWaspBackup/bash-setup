@@ -103,7 +103,7 @@ for /d %%D in ("%TEMP%\BashLib-*") do (
 )
 
 echo Installing B.A.S.H Launcher as bash-launcher.simba...
-curl.exe -sL -o "%SimbaPath%\Scripts\bash-launcher.simba" "https://raw.githubusercontent.com/BigAussie/BigAussie-Simba-Scripts/main/B.A.S.H%%20Launcher.simba"
+curl.exe -sL -o "%SimbaPath%\Scripts\bash-launcher.simba" "https://raw.githubusercontent.com/BigAussie/BASH/main/B.A.S.H%%20Launcher.simba"
 if not exist "%SimbaPath%\Scripts\bash-launcher.simba" (
     echo [ERROR] Failed to download B.A.S.H Launcher
     if "%SILENT%"=="0" pause

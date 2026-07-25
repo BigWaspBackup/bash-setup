@@ -3,6 +3,8 @@
 Windows installer package for Simba with **SRL-B**, **BashLib**, and the **B.A.S.H Launcher**  
 (**BigAussie Script House**).
 
+Downloads the launcher from: https://github.com/BigAussie/BASH
+
 **Discord:** https://discord.gg/qsmKs5uKfR
 
 ### Fresh install (recommended)
