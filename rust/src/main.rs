@@ -195,7 +195,7 @@ impl SimbaInstaller {
                 Layout::top_down(Align::Center),
                 |ui| {
                     ui.label(
-                        "Welcome to the B.A.S.H Simba installer.\nBigAussie Script House — color scripts for OSRS.\nTo begin the installation click Next.",
+                        "Welcome to the B.A.S.H Simba installer.\nBigAussie Script House - color scripts for OSRS.\nTo begin the installation click Next.",
                     );
                     ui.add_space(8.0);
                     self.show_discord_link(ui);
@@ -481,7 +481,7 @@ impl eframe::App for SimbaInstaller {
             let width = size.x;
             let height = size.y;
 
-            ui.heading("B.A.S.H — BigAussie Script House");
+            ui.heading("B.A.S.H - BigAussie Script House");
             ui.hyperlink_to("Discord", DISCORD_URL);
             ui.add_space(height / 8.0);
 

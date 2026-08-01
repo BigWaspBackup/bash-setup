@@ -126,7 +126,7 @@ pub fn prepare_directory(
 
     if data_folder_created {
         let path = simba_dir.join("Data").join("default.simba");
-        let content = "(* Thank you for choosing B.A.S.H — BigAussie Script House *)\n(* Discord: https://discord.gg/qsmKs5uKfR *)\n\n(* To start simply double click the green play button. *)\n\nbegin\n  SimbaRunInTab(ScriptPath + 'bash-launcher.simba');\nend.\n";
+        let content = "(* Thank you for choosing B.A.S.H - BigAussie Script House *)\n(* Discord: https://discord.gg/qsmKs5uKfR *)\n\n(* To start simply double click the green play button. *)\n\nbegin\n  SimbaRunInTab(ScriptPath + 'bash-launcher.simba');\nend.\n";
         create_data_files(path, content, tx);
 
         let path = simba_dir.join("Data").join("packages.ini");

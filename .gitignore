@@ -3,7 +3,7 @@ rust/target/
 rust/**/*.pdb
 Cargo.lock
 
-# Built installer — attach via GitHub Release, don't commit the binary
+# Built installer - attach via GitHub Release, don't commit the binary
 dist/
 *.exe
 

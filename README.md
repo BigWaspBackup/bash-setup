@@ -18,7 +18,7 @@ Downloads the launcher from: https://github.com/BigAussie/BASH
 1. Run `tools\BASH_Force_Update_Tool.bat` **as Administrator**.
 2. It backs up Simba + RuneLite, reinstalls both, then restores `credentials.simba`, `Configs\`, and `Includes\WaspLib\overrides.simba`.
 
-## Maintainers — build the GUI installer
+## Maintainers - build the GUI installer
 
 Requires [Rust](https://rustup.rs/) on Windows.
 

@@ -29,7 +29,7 @@ pushd "%CD%"
 CD /D "%~dp0"
 
 echo.
-echo  B.A.S.H — BigAussie Script House
+echo  B.A.S.H - BigAussie Script House
 echo  ================================
 echo  Discord: https://discord.gg/qsmKs5uKfR
 echo.
@@ -64,7 +64,7 @@ if exist "%SCRIPT_DIR%default.simba" (
     copy /Y "%SCRIPT_DIR%default.simba" "%SimbaPath%\Data\default.simba" >nul
 ) else (
     >"%SimbaPath%\Data\default.simba" (
-        echo ^(* Thank you for choosing B.A.S.H — BigAussie Script House *^)
+        echo ^(* Thank you for choosing B.A.S.H - BigAussie Script House *^)
         echo ^(* Discord: https://discord.gg/qsmKs5uKfR *^)
         echo.
         echo ^(* To start simply double click the green play button. *^)
