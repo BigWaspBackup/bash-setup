@@ -1,18 +1,32 @@
 #![windows_subsystem = "windows"]
 use std::{
     env,
-    fs::{remove_file, File},
-    io::Cursor,
-    path::{Path, PathBuf},
+    fs::{remove_file, File, OpenOptions},
+    io::{Cursor, Write},
+    path::PathBuf,
     process::Command,
-    sync::mpsc,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        mpsc,
+    },
     thread,
-    time::Duration,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use eframe::{egui, NativeOptions};
 use egui::{vec2, Align, Button, CentralPanel, Color32, IconData, Layout, ProgressBar, RichText};
 use image::ImageReader;
+use windows::{
+    core::HSTRING,
+    Win32::UI::WindowsAndMessaging::{
+        MessageBoxW, IDYES, MB_ICONERROR, MB_ICONINFORMATION, MB_OK, MB_YESNO,
+    },
+};
+
+/// Set once the installer window has drawn. A crash before this is the
+/// "double-click does nothing" report: the process is a GUI app, so a failed
+/// OpenGL startup exits with no console and no dialog.
+static GUI_SHOWN: AtomicBool = AtomicBool::new(false);
 
 mod utils;
 use utils::{create_shortcut, download_file, download_launcher, prepare_directory, unzip};
@@ -140,11 +154,22 @@ fn download_github_zipball(
     true
 }
 
+fn simba_install_dir() -> PathBuf {
+    if let Ok(local) = env::var("LOCALAPPDATA") {
+        return PathBuf::from(local).join("Simba");
+    }
+    if let Ok(profile) = env::var("USERPROFILE") {
+        return PathBuf::from(profile)
+            .join("AppData")
+            .join("Local")
+            .join("Simba");
+    }
+    PathBuf::from(r"C:\Users\Public\Simba")
+}
+
 impl SimbaInstaller {
     fn new(_cc: &eframe::CreationContext<'_>, silent: bool) -> Self {
-        let install_path =
-            env::var("LOCALAPPDATA").expect("Could not get LOCALAPPDATA environment variable");
-        let simba_dir = Path::new(&install_path).join("Simba");
+        let simba_dir = simba_install_dir();
         let simba_exists = simba_dir.exists() && simba_dir.is_dir();
 
         Self {
@@ -338,11 +363,19 @@ impl SimbaInstaller {
     }
 
     fn run_installation_thread(simba_dir: PathBuf, tx: mpsc::Sender<InstallMessage>) {
-        let client = reqwest::blocking::Client::builder()
+        let client = match reqwest::blocking::Client::builder()
             .user_agent("BASH-Installer")
             .timeout(Duration::from_secs(300))
             .build()
-            .expect("Failed to build reqwest client");
+        {
+            Ok(client) => client,
+            Err(e) => {
+                let _ = tx.send(InstallMessage::Error(format!(
+                    "Failed to start the download client: {e}"
+                )));
+                return;
+            }
+        };
 
         let mut current_progress = 0.0;
 
@@ -474,6 +507,7 @@ impl SimbaInstaller {
 
 impl eframe::App for SimbaInstaller {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        GUI_SHOWN.store(true, Ordering::Relaxed);
         self.ensure_logo(ctx);
 
         CentralPanel::default().show(ctx, |ui| {
@@ -501,6 +535,9 @@ fn load_icon_from_embedded_png(bytes: &[u8]) -> Result<IconData, String> {
     let img = ImageReader::with_format(Cursor::new(bytes), image::ImageFormat::Png)
         .decode()
         .map_err(|e| format!("Failed to decode embedded icon image: {}", e))?;
+    // The source art is 705x690. CreateIcon rejects or crashes on icons that large,
+    // which aborts startup before any window exists.
+    let img = img.resize(256, 256, image::imageops::FilterType::Triangle);
     let rgba = img.into_rgba8();
     let (width, height) = rgba.dimensions();
     let pixels = rgba.into_raw();
@@ -511,42 +548,205 @@ fn load_icon_from_embedded_png(bytes: &[u8]) -> Result<IconData, String> {
     })
 }
 
-fn main() -> Result<(), eframe::Error> {
-    let args: Vec<String> = std::env::args().collect();
-    let silent = args.contains(&"--silent".to_string());
+fn log_line(message: &str) {
+    let path = env::temp_dir().join("bash-setup.log");
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs())
+        .unwrap_or(0);
+    if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) {
+        let _ = writeln!(file, "{stamp} {message}");
+    }
+}
 
-    if silent {
-        let (tx, rx) = mpsc::channel::<InstallMessage>();
-        let simba_dir =
-            PathBuf::from(env::var("LOCALAPPDATA").expect("Could not get LOCALAPPDATA"))
-                .join("Simba");
+fn show_message(message: &str, style: windows::Win32::UI::WindowsAndMessaging::MESSAGEBOX_STYLE) {
+    log_line(message);
+    unsafe {
+        MessageBoxW(
+            None,
+            &HSTRING::from(message),
+            &HSTRING::from("B.A.S.H Setup"),
+            style,
+        );
+    }
+}
 
-        thread::spawn(move || {
-            SimbaInstaller::run_installation_thread(simba_dir, tx);
-        });
+fn show_error(message: &str) {
+    show_message(message, MB_OK | MB_ICONERROR);
+}
 
-        for msg in rx {
-            match msg {
-                InstallMessage::Completed => return Ok(()),
-                InstallMessage::Error(_) => std::process::exit(1),
-                _ => {}
-            }
+fn is_silent_arg(arg: &str) -> bool {
+    arg.eq_ignore_ascii_case("--silent") || arg.eq_ignore_ascii_case("/silent")
+}
+
+fn run_silent() -> Result<(), String> {
+    let (tx, rx) = mpsc::channel::<InstallMessage>();
+    let simba_dir = simba_install_dir();
+    thread::spawn(move || {
+        SimbaInstaller::run_installation_thread(simba_dir, tx);
+    });
+
+    let mut completed = false;
+    for msg in rx {
+        match msg {
+            InstallMessage::Completed => completed = true,
+            InstallMessage::Error(err) => return Err(err),
+            _ => {}
         }
-        return Ok(());
+    }
+    if completed {
+        Ok(())
+    } else {
+        Err("Installation stopped before it finished.".to_string())
+    }
+}
+
+#[link(name = "kernel32")]
+extern "system" {
+    fn AllocConsole() -> i32;
+}
+
+fn offer_headless_install(error: &str) {
+    let prompt = format!(
+        "B.A.S.H Setup couldn't open its window, so it looked like nothing happened.\n\n\
+         {error}\n\n\
+         Install anyway without the window?\n\
+         This downloads Simba into your local AppData\\Simba folder and can take a few minutes.\n\
+         A console window will show progress."
+    );
+    let answer = unsafe {
+        MessageBoxW(
+            None,
+            &HSTRING::from(&prompt),
+            &HSTRING::from("B.A.S.H Setup"),
+            MB_YESNO | MB_ICONERROR,
+        )
+    };
+    log_line(&format!("gui failed: {error}"));
+    if answer != IDYES {
+        return;
     }
 
-    let icon_data =
-        load_icon_from_embedded_png(ICON_BYTES).expect("Failed to decode embedded app icon!");
+    unsafe {
+        AllocConsole();
+    }
+    let mut console = match OpenOptions::new().write(true).open("CONOUT$") {
+        Ok(file) => file,
+        Err(err) => {
+            show_error(&format!("Could not open a console window: {err}"));
+            return;
+        }
+    };
+    let _ = writeln!(
+        console,
+        "Installing B.A.S.H. This can take a few minutes. Leave this window open."
+    );
+
+    let (tx, rx) = mpsc::channel::<InstallMessage>();
+    let simba_dir = simba_install_dir();
+    thread::spawn(move || {
+        SimbaInstaller::run_installation_thread(simba_dir, tx);
+    });
+
+    let mut completed = false;
+    let mut failed = None;
+    for msg in rx {
+        match msg {
+            InstallMessage::Status(status) => {
+                let _ = writeln!(console, "{status}");
+            }
+            InstallMessage::Progress(progress) => {
+                let _ = writeln!(console, "{:.0}%", progress * 100.0);
+            }
+            InstallMessage::Completed => {
+                completed = true;
+                let _ = writeln!(console, "Installation complete.");
+            }
+            InstallMessage::Error(err) => {
+                let _ = writeln!(console, "Installation failed: {err}");
+                failed = Some(err);
+            }
+        }
+    }
+
+    if let Some(err) = failed {
+        show_error(&format!("Installation failed:\n\n{err}"));
+    } else if completed {
+        show_message(
+            "Installation complete. Open Simba from the desktop shortcut.",
+            MB_OK | MB_ICONINFORMATION,
+        );
+    } else {
+        show_error(
+            "Installation stopped before it finished.\n\nDetails were written to %TEMP%\\bash-setup.log",
+        );
+    }
+}
+
+fn run_gui() -> Result<(), String> {
+    let icon_data = match load_icon_from_embedded_png(ICON_BYTES) {
+        Ok(icon) => Some(icon),
+        Err(err) => {
+            log_line(&format!("icon skipped: {err}"));
+            None
+        }
+    };
+
+    let mut viewport = eframe::egui::ViewportBuilder::default()
+        .with_inner_size(eframe::egui::vec2(800.0, 600.0));
+    if let Some(icon_data) = icon_data {
+        viewport = viewport.with_icon(icon_data);
+    }
+
+    // eframe creates the window hidden and only shows it after the first swap.
+    // With vsync on, some Windows drivers never complete that swap for a hidden
+    // window, so the process sits there and the user sees nothing.
     let options = NativeOptions {
-        viewport: eframe::egui::ViewportBuilder::default()
-            .with_inner_size(eframe::egui::vec2(800.0, 600.0))
-            .with_icon(icon_data),
+        viewport,
+        vsync: false,
+        centered: true,
         ..Default::default()
     };
 
     eframe::run_native(
         "B.A.S.H Simba Installer",
         options,
-        Box::new(|cc| Ok(Box::new(SimbaInstaller::new(cc, silent)))),
+        Box::new(|cc| Ok(Box::new(SimbaInstaller::new(cc, false)))),
     )
+    .map_err(|err| err.to_string())
+}
+
+fn main() {
+    log_line("bash-setup starting");
+    let previous_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        log_line(&format!("panic: {info}"));
+        previous_hook(info);
+    }));
+
+    let silent = std::env::args().skip(1).any(|arg| is_silent_arg(&arg));
+    if silent {
+        if let Err(err) = run_silent() {
+            show_error(&format!("Installation failed:\n\n{err}"));
+            std::process::exit(1);
+        }
+        return;
+    }
+
+    let gui_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(run_gui));
+    let startup_error = match gui_result {
+        Ok(Ok(())) => None,
+        Ok(Err(err)) => Some(err),
+        Err(_) => Some(
+            "The installer crashed before the window opened. A graphics driver problem is the usual cause.".to_string(),
+        ),
+    };
+
+    if let Some(err) = startup_error {
+        if GUI_SHOWN.load(Ordering::Relaxed) {
+            show_error(&format!("B.A.S.H Setup hit an error:\n\n{err}"));
+        } else {
+            offer_headless_install(&err);
+        }
+    }
 }

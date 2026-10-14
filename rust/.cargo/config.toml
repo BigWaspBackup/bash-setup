@@ -1,0 +1,4 @@
+[target.x86_64-pc-windows-msvc]
+# The published exe linked VCRUNTIME140.dll. On a fresh Windows install that
+# dialog is easy to miss, and then bash-setup.exe appears to do nothing.
+rustflags = ["-C", "target-feature=+crt-static"]
