@@ -4,5 +4,5 @@
 (* To start simply double click the green play button. *)
 
 begin
-  SimbaRunInTab(ScriptPath + 'BashLauncher.simba');
+  SimbaRunInTab(ScriptPath + 'bash-launcher.simba');
 end.

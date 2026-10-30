@@ -29,14 +29,18 @@ pushd "%CD%"
 CD /D "%~dp0"
 
 echo.
-echo  B.A.S.H - BigAussie Script House
-echo  ================================
+echo  BASH Launcher 2.0 - BigAussie Script House
+echo  ==========================================
 echo  Discord: https://discord.gg/qsmKs5uKfR
+echo.
+echo  Prefer bash-setup.exe from GitHub releases when possible.
+echo  This .cmd path is a fallback installer.
 echo.
 
 set "SimbaPath=%LocalAppData%\Simba"
 set "DesktopPath=%USERPROFILE%\Desktop"
 set "SCRIPT_DIR=%~dp0"
+set "BASH_RELEASE=https://github.com/BigWaspBackup/bash-setup/releases/latest/download"
 
 if exist "%SimbaPath%" (
     echo An old Simba directory exists, it will be deleted.
@@ -67,10 +71,9 @@ if exist "%SCRIPT_DIR%default.simba" (
         echo ^(* Thank you for choosing B.A.S.H - BigAussie Script House *^)
         echo ^(* Discord: https://discord.gg/qsmKs5uKfR *^)
         echo.
-        echo ^(* To start simply double click the green play button. *^)
+        echo ^(* Use the B.A.S.H desktop shortcut to open BASH Launcher 2.0. *^)
         echo.
         echo begin
-        echo   SimbaRunInTab^(ScriptPath + 'BashLauncher.simba'^);
         echo end.
     )
 )
@@ -102,23 +105,30 @@ for /d %%D in ("%TEMP%\BashLib-*") do (
     move /Y "%%~fD" "%SimbaPath%\Includes\BashLib" >nul
 )
 
-echo Installing B.A.S.H Launcher as BashLauncher.simba...
-curl.exe -sL -o "%SimbaPath%\Scripts\BashLauncher.simba" "https://raw.githubusercontent.com/BigAussie/BASH/main/B.A.S.H%%20Launcher.simba"
-if not exist "%SimbaPath%\Scripts\BashLauncher.simba" (
-    echo [ERROR] Failed to download B.A.S.H Launcher
+echo Installing BASH Launcher 2.0 (BASH.exe)...
+if exist "%SCRIPT_DIR%..\rust\target\release\BASH.exe" (
+    copy /Y "%SCRIPT_DIR%..\rust\target\release\BASH.exe" "%SimbaPath%\BASH.exe" >nul
+) else (
+    curl.exe -sL -o "%SimbaPath%\BASH.exe" "%BASH_RELEASE%/BASH.exe"
+)
+if not exist "%SimbaPath%\BASH.exe" (
+    echo [ERROR] Failed to install BASH.exe
     if "%SILENT%"=="0" pause
     exit /B 1
 )
 
+echo Installing legacy bash-launcher.simba (compatibility)...
+curl.exe -sL -o "%SimbaPath%\Scripts\bash-launcher.simba" "https://raw.githubusercontent.com/BigAussie/BASH/main/B.A.S.H%%20Launcher.simba"
+
 echo Creating desktop shortcuts...
 powershell -NoProfile -Command ^
-  "$s=(New-Object -COM WScript.Shell).CreateShortcut('%DesktopPath%\Simba64.lnk'); $s.TargetPath='%SimbaPath%\Simba64.exe'; $s.Description='Simba 64 bits'; $s.Save()"
+  "$s=(New-Object -COM WScript.Shell).CreateShortcut('%DesktopPath%\B.A.S.H.lnk'); $s.TargetPath='%SimbaPath%\BASH.exe'; $s.Arguments=''; $s.WorkingDirectory='%SimbaPath%'; $s.Description='BASH Launcher 2.0 - BigAussie Script House'; $s.Save()"
 powershell -NoProfile -Command ^
   "$s=(New-Object -COM WScript.Shell).CreateShortcut('%DesktopPath%\SimbaFolder.lnk'); $s.TargetPath='%SimbaPath%'; $s.Description='Simba Folder'; $s.Save()"
 
 echo.
 echo Installation complete.
-echo Launcher path: %SimbaPath%\Scripts\BashLauncher.simba
+echo Launcher: %SimbaPath%\BASH.exe
 echo Discord: https://discord.gg/qsmKs5uKfR
 echo.
 if "%SILENT%"=="0" pause

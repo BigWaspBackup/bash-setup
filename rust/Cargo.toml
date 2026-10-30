@@ -1,14 +1,28 @@
 [package]
 name = "bash-setup"
-version = "0.1.0"
+version = "2.0.0"
 edition = "2021"
 authors = ["BigAussie"]
-description = "Simba installer that sets up SRL-B, BashLib, and the B.A.S.H Launcher"
+description = "BASH Launcher 2.0 — Windows installer (bash-setup.exe) and launcher (BASH.exe) for Simba, SRL-B, BashLib and scripts"
 license = "GPLv3"
+
+[lib]
+name = "bash_core"
+path = "src/lib.rs"
+
+[[bin]]
+name = "bash-setup"
+path = "src/bin/bash-setup.rs"
+
+[[bin]]
+name = "BASH"
+path = "src/bin/bash.rs"
 
 [dependencies]
 egui = "0.31.1"
-eframe = "0.31.1"
+# Local copy of 0.31.1 so Windows can keep the OpenGL context between frames.
+# Dropping it every frame is what flashed the window black.
+eframe = { path = "vendor/eframe" }
 image = "0.25.6"
 reqwest = { version = "0.12", features = ["blocking", "rustls-tls"], default-features = false }
 serde = { version = "1.0", features = ["derive"] }
@@ -21,6 +35,8 @@ windows = { version = "0.61", features = [
     "Win32_System_Com",
     "Win32_Graphics_Gdi",
     "Win32_UI_Shell",
+    "Win32_System_RestartManager",
+    "Win32_System_Threading",
 ] }
 
 [build-dependencies]

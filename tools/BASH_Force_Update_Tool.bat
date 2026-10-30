@@ -150,6 +150,8 @@ set "runeLiteSetupPath=%forceUpdatePath%\RuneLiteSetup_%datetime%.exe"
 set "simba64ExePath=%simbaPath%\Simba64.exe"
 set "runeLiteUninstallerPath=%runeLitePath%\unins000.exe"
 set "simba64ShortcutPath=%USERPROFILE%\Desktop\Simba64.lnk"
+set "bashShortcutPath=%USERPROFILE%\Desktop\B.A.S.H.lnk"
+set "bashExePath=%simbaPath%\BASH.exe"
 set "portable7zDir=%LOCALAPPDATA%\BashTools"
 set "portable7zPath=%portable7zDir%\7zr.exe"
 set "logFile=%backupRootPath%\BashUpdate_%datetime%.log"
@@ -254,7 +256,7 @@ exit /b
 
 :KillProcesses
 call :Log "[INFO] Killing Simba, RuneLite, Jagex Launcher processes..."
-for %%p in (Simba32.exe Simba64.exe RuneLite.exe JagexLauncher.exe bash-setup.exe) do (
+for %%p in (Simba32.exe Simba64.exe RuneLite.exe JagexLauncher.exe bash-setup.exe BASH.exe) do (
     taskkill /f /im %%p >> "%logFile%" 2>&1
 )
 exit /b
@@ -452,7 +454,18 @@ exit /b
 
 :CreateShortcuts
 call :Log "[INFO] Creating desktop shortcut..."
-powershell "$s=(New-Object -COM WScript.Shell).CreateShortcut('%simba64ShortcutPath%'); $s.TargetPath='%simbaPath%\Simba64.exe'; $s.Save()" >> "%logFile%" 2>&1
+:: bash-setup already creates "B.A.S.H.lnk" (BASH.exe). Only fall back to a
+:: direct Simba shortcut when BASH.exe is missing, and drop the old Simba64.lnk.
+if exist "%simba64ShortcutPath%" del "%simba64ShortcutPath%"
+if exist "%bashShortcutPath%" (
+    call :Log "[INFO] B.A.S.H shortcut already present."
+) else if exist "%bashExePath%" (
+    powershell "$s=(New-Object -COM WScript.Shell).CreateShortcut('%bashShortcutPath%'); $s.TargetPath='%bashExePath%'; $s.WorkingDirectory='%simbaPath%'; $s.Description='B.A.S.H - BigAussie Script House'; $s.Save()" >> "%logFile%" 2>&1
+    call :Log "[SUCCESS] Created B.A.S.H shortcut (BASH.exe)."
+) else (
+    powershell "$s=(New-Object -COM WScript.Shell).CreateShortcut('%bashShortcutPath%'); $s.TargetPath='%simbaPath%\Simba64.exe'; $s.Arguments='--open --run \"%simbaPath%\Scripts\bash-launcher.simba\"'; $s.WorkingDirectory='%simbaPath%'; $s.Save()" >> "%logFile%" 2>&1
+    call :Log "[WARN] BASH.exe not found; B.A.S.H shortcut points at Simba64.exe --open --run instead."
+)
 if exist "%simbaPath%\Simba32.exe" del "%simbaPath%\Simba32.exe"
 exit /b
 
