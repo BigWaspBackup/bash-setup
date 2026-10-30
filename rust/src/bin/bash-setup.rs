@@ -19,6 +19,7 @@ use bash_core::{
     download, install, locks,
     log::{log_line, log_path, set_log_name},
     paths::{self, SimbaPaths},
+    profile,
     send_progress, send_status,
     shortcut::{self, ShortcutSpec},
     state::BashState,
@@ -331,24 +332,39 @@ fn run_installation(paths: SimbaPaths, tx: ProgressSender, silent: bool) {
     send_progress(&tx, 0.05);
 
     // Anything holding our DLLs or Simba64.exe open has to go first.
+    // RemoteInput injects into every RuneLite client, so always close all of them.
     let lockers = locks::find_update_lockers(&paths, true);
-    if !lockers.is_empty() {
-        let names: Vec<String> = lockers.iter().map(|l| l.friendly_name()).collect();
-        let mut unique = names.clone();
+    let runelite_open = profile::runelite_running();
+    if runelite_open || !lockers.is_empty() {
+        let mut unique: Vec<String> = lockers.iter().map(|l| l.friendly_name()).collect();
+        if runelite_open {
+            unique.push("RuneLite".into());
+        }
         unique.sort();
         unique.dedup();
         let proceed = silent
             || ui::ask_yes_no(&format!(
-                "These programs are using Simba files and must be closed to continue:\n\n{}\n\nClose them now?",
+                "These programs are using Simba files and must be closed to continue:\n\n{}\n\n\
+                 Every RuneLite client will be closed (RemoteInput holds the library DLLs open).\n\n\
+                 Close them now?",
                 unique.join("\n")
             ));
         if !proceed {
             return fail(&tx, format!("Close {} and run the installer again.", unique.join(", ")));
         }
         send_status(&tx, format!("Closing {}...", unique.join(", ")));
+        if runelite_open {
+            let _ = profile::close_runelite();
+            thread::sleep(Duration::from_millis(750));
+        }
         let remaining = locks::close_processes(&lockers, Duration::from_secs(10));
-        if !remaining.is_empty() {
-            let names: Vec<String> = remaining.iter().map(|l| l.friendly_name()).collect();
+        if !remaining.is_empty() || profile::runelite_running() {
+            let mut names: Vec<String> = remaining.iter().map(|l| l.friendly_name()).collect();
+            if profile::runelite_running() {
+                names.push("RuneLite".into());
+            }
+            names.sort();
+            names.dedup();
             return fail(&tx, format!("Could not close {}. Close it manually and try again.", names.join(", ")));
         }
     }

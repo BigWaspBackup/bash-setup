@@ -99,6 +99,9 @@ pub struct BashState {
     /// "dark" or "light". Empty means dark.
     #[serde(default)]
     pub theme: String,
+    /// RuneLite account names are shown as Hidden outside account settings.
+    #[serde(default)]
+    pub anonymous: bool,
 }
 
 fn default_true() -> bool {

@@ -54,6 +54,11 @@ impl SimbaPaths {
         self.bash_data().join("downloads")
     }
 
+    /// Extracted item images, map chunks, and other files Simba rebuilds as scripts run.
+    pub fn cache(&self) -> PathBuf {
+        self.data().join("cache")
+    }
+
     pub fn state_file(&self) -> PathBuf {
         self.bash_data().join("state.json")
     }

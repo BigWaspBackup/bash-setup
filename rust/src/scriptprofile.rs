@@ -428,6 +428,9 @@ impl Editor {
         let Some(script) = &self.run_script else {
             return (true, true);
         };
+        if script.name.eq_ignore_ascii_case("Standalone Farm and Birdhouse Runs") {
+            return (true, true);
+        }
         let catalog_farm = script.features.iter().any(|feature| feature == "farm_runs");
         let catalog_bird = script.features.iter().any(|feature| feature == "birdhouses");
         if let Some(course) = &self.course {

@@ -51,7 +51,7 @@ const LIBRARY_CHECK_INTERVAL: Duration = Duration::from_secs(60 * 60);
 enum ExtraAction {
     Open(PathBuf),
     Reinstall,
-    ClearDownloads,
+    ClearCache,
     Repair,
     InstallLib(String),
     Copied,
@@ -182,6 +182,10 @@ pub struct Launcher {
     remote_input: bool,
     /// When on, the real mouse and keyboard are ignored while a script runs.
     block_real_input: bool,
+    /// RuneLite account names are shown as Hidden outside account settings.
+    anonymous: bool,
+    /// Accepted license key is visible until the launcher is closed.
+    show_license: bool,
     /// Script to run after its update download finishes.
     run_after_update: Option<String>,
     /// Shared script settings, and the AIO Agility run setup.
@@ -250,6 +254,8 @@ impl Launcher {
             theme: chrome::Theme::Dark,
             remote_input: true,
             block_real_input: true,
+            anonymous: false,
+            show_license: false,
             run_after_update: None,
             profile_editor: None,
             agility_account: None,
@@ -276,6 +282,7 @@ impl Launcher {
         self.anchor_output = state.anchor_output;
         self.theme = chrome::Theme::from_saved(&state.theme);
         let remote = crate::wasplib::load(&self.paths.wasplib_config());
+        self.anonymous = state.anonymous;
         self.remote_input = remote.enabled;
         self.block_real_input = remote.block_real_input;
         self.profile_prompt_open = !state.prompted_profile && !profile::is_installed(&self.install_id);
@@ -527,9 +534,13 @@ impl Launcher {
         let mut open = true;
         let mut changed = false;
         let mut action = None;
+        let max_height = (ctx.screen_rect().height() - 96.0).max(280.0);
         egui::Window::new("Settings")
             .collapsible(false)
             .auto_sized()
+            .vscroll(true)
+            .max_height(max_height)
+            .constrain(true)
             .open(&mut open)
             .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
             .show(ctx, |ui| {
@@ -564,6 +575,21 @@ impl Launcher {
                 ui.add_space(4.0);
                 let note = "The output window follows the RuneLite window it belongs to. Turn this off to leave the output window where you place it.";
                 let galley = egui::WidgetText::from(RichText::new(note).weak().size(12.0)).into_galley(
+                    ui,
+                    Some(egui::TextWrapMode::Wrap),
+                    440.0,
+                    egui::TextStyle::Body,
+                );
+                ui.add(Label::new(galley));
+                ui.add_space(10.0);
+
+                ui.label(RichText::new("Privacy").strong());
+                if ui.checkbox(&mut self.anonymous, "Anonymous").changed() {
+                    self.save_anonymous();
+                }
+                ui.add_space(4.0);
+                let privacy = "RuneLite account names are shown as Hidden in the client list, running panel, output window, and logs.";
+                let galley = egui::WidgetText::from(RichText::new(privacy).weak().size(12.0)).into_galley(
                     ui,
                     Some(egui::TextWrapMode::Wrap),
                     440.0,
@@ -641,11 +667,12 @@ impl Launcher {
                         action = Some(ExtraAction::Reinstall);
                     }
                     if ui
-                        .button("Clear download cache")
-                        .on_hover_text("Delete install files BASH already downloaded")
+                        .add_enabled(!self.script_running(), Button::new("Clear cache"))
+                        .on_hover_text("Delete extracted item images, map chunks, and other Simba cache files. Scripts rebuild them the next time they run.")
+                        .on_disabled_hover_text("Stop the running script first.")
                         .clicked()
                     {
-                        action = Some(ExtraAction::ClearDownloads);
+                        action = Some(ExtraAction::ClearCache);
                     }
                 });
                 ui.add_space(10.0);
@@ -723,6 +750,13 @@ impl Launcher {
         let _ = state.save(&path);
     }
 
+    fn save_anonymous(&self) {
+        let path = self.paths.state_file();
+        let mut state = crate::state::BashState::load(&path);
+        state.anonymous = self.anonymous;
+        let _ = state.save(&path);
+    }
+
     fn run_extra(&mut self, action: ExtraAction) {
         match action {
             ExtraAction::Open(path) => {
@@ -736,7 +770,7 @@ impl Launcher {
                 self.reinstall_requested = true;
                 self.settings_open = false;
             }
-            ExtraAction::ClearDownloads => self.clear_downloads(),
+            ExtraAction::ClearCache => self.clear_cache(),
             ExtraAction::Repair => self.repair_confirm = true,
             ExtraAction::InstallLib(name) => self.install_chosen_library(&name),
             ExtraAction::Copied => self.status = "Copied launcher details.".into(),
@@ -862,10 +896,17 @@ impl Launcher {
             return;
         };
         if !chrome::ask_yes_no(&format!(
-            "Install {name} {}?\n\nClose RuneLite first. This replaces the installed library.\n\nUpdate libraries keeps this choice. Pick Latest here to go back to the normal release.",
+            "Install {name} {}?\n\nEvery RuneLite client will be closed first — RemoteInput keeps the library DLLs open.\n\nUpdate libraries keeps this choice. Pick Latest here to go back to the normal release.",
             spec.label
         )) {
             return;
+        }
+        if crate::profile::runelite_running() {
+            self.status = "Closing RuneLite...".into();
+            if !crate::profile::close_runelite() || crate::profile::runelite_running() {
+                self.status = "Could not close RuneLite. Close every client, then try again.".into();
+                return;
+            }
         }
         self.installing_lib = name.to_string();
         self.status = format!("Installing {name} {}...", spec.label);
@@ -952,19 +993,24 @@ impl Launcher {
         )
     }
 
-    fn clear_downloads(&mut self) {
-        let dir = self.paths.downloads();
+    fn clear_cache(&mut self) {
+        if !chrome::ask_yes_no(
+            "Clear the Simba cache?\n\nThis deletes extracted item images, map chunks, and other cached files. Scripts rebuild them the next time they run.",
+        ) {
+            return;
+        }
+        let dir = self.paths.cache();
         if dir.exists() {
             if let Err(e) = std::fs::remove_dir_all(&dir) {
-                self.status = format!("Could not clear downloads: {e}");
+                self.status = format!("Could not clear the Simba cache: {e}");
                 return;
             }
         }
         if let Err(e) = std::fs::create_dir_all(&dir) {
-            self.status = format!("Could not recreate the download folder: {e}");
+            self.status = format!("Could not recreate the Simba cache folder: {e}");
             return;
         }
-        self.status = "Cleared downloaded install files.".into();
+        self.status = "Cleared the Simba cache.".into();
     }
 
     fn install_runelite_profile(&mut self) {
@@ -1079,6 +1125,7 @@ impl Launcher {
     }
 
     fn client_choice(&self, client: &ClientWindow) -> String {
+        let account = shown_account(self.anonymous, &client.account());
         if let Some(run) = self.run_on_client(client.hwnd) {
             let state = if run.stopping() {
                 "stopping"
@@ -1087,7 +1134,9 @@ impl Launcher {
             } else {
                 "running"
             };
-            format!("{}  ·  {} ({state})", client.account(), run.name)
+            format!("{account}  ·  {} ({state})", run.name)
+        } else if self.anonymous && is_player_name(&client.account()) {
+            "Hidden".to_string()
         } else {
             client.label()
         }
@@ -1109,7 +1158,7 @@ impl Launcher {
                 .show(ui, |ui| {
                     ui.horizontal(|ui| {
                         ui.vertical(|ui| {
-                            ui.label(RichText::new(&run.account).strong().size(16.0));
+                            ui.label(RichText::new(shown_account(self.anonymous, &run.account)).strong().size(16.0));
                             ui.label(RichText::new(&run.name).size(13.0));
                             if !run.activity.is_empty() && !run.activity.eq_ignore_ascii_case("running") {
                                 ui.label(RichText::new(&run.activity).size(13.0).color(Color32::from_rgb(232, 196, 96)));
@@ -1459,11 +1508,28 @@ impl Launcher {
                 .show(ui, |ui| {
                     ui.horizontal(|ui| {
                         ui.label(RichText::new("License key").strong().color(label_color));
-                        let edit = ui.add(
-                            TextEdit::singleline(&mut self.license_key)
-                                .desired_width(360.0)
-                                .hint_text("Paste your license key here"),
-                        );
+                        let reveal = self.show_license;
+                        let mut edit = TextEdit::singleline(&mut self.license_key)
+                            .desired_width(340.0)
+                            .hint_text("Paste your license key here");
+                        if accepted {
+                            edit = edit
+                                .password(!reveal)
+                                .margin(Margin { left: 4, right: 22, top: 2, bottom: 2 });
+                        }
+                        let edit = ui.add(edit);
+                        if accepted {
+                            let eye_rect = egui::Rect::from_center_size(
+                                egui::pos2(edit.rect.right() + 14.0, edit.rect.center().y),
+                                egui::vec2(14.0, edit.rect.height() + 4.0),
+                            );
+                            if eye_button(ui, eye_rect, reveal)
+                                .on_hover_text(if reveal { "Hide the license key" } else { "Show the license key" })
+                                .clicked()
+                            {
+                                self.show_license = !reveal;
+                            }
+                        }
                         let save = ui.button("Save").clicked();
                         if ui
                             .add_enabled(!self.discord_pending, Button::new(if self.discord_pending { "Waiting for Discord..." } else { "Log in with Discord" }))
@@ -1733,6 +1799,8 @@ impl Launcher {
 
     pub fn output_windows(&mut self, ctx: &egui::Context) {
         let pixels_per_point = ctx.pixels_per_point();
+        let anonymous = self.anonymous;
+        let names = account_names(&self.clients, &self.runs);
         for run in &mut self.runs {
             if run.output_hidden.load(Ordering::Relaxed) {
                 // The window is gone, so the next show has to place it again.
@@ -1749,15 +1817,15 @@ impl Launcher {
                 run.anchor.wait = None;
                 None
             };
-            let title = format!("{} — {}", run.account, run.name);
-            let account = run.account.clone();
+            let title = format!("{} — {}", shown_account(anonymous, &run.account), run.name);
+            let account = shown_account(anonymous, &run.account);
             let script_name = run.name.clone();
             let run_id = run.id;
-            let copy_body = run.log_text.clone();
+            let copy_body = conceal_text(anonymous, &run.log_text, &names);
             let text = if run.log_text.is_empty() {
-                "Please wait, the GUI is loading...".to_string()
+                "Please wait, script starting...".to_string()
             } else {
-                run.log_text.clone()
+                copy_body.clone()
             };
             let stop = run.stop.clone();
             let ctrl = run.ctrl.clone();
@@ -2192,9 +2260,9 @@ impl Launcher {
                     "run {} pid {} target {handle} account {}",
                     script.name,
                     child.id(),
-                    client.account()
+                    shown_account(self.anonymous, &client.account())
                 ));
-                self.status = format!("Running {} on {}.", script.name, client.account());
+                self.status = format!("Running {} on {}.", script.name, shown_account(self.anonymous, &client.account()));
                 self.runs.push(Running {
                     id,
                     name: script.name.clone(),
@@ -2517,6 +2585,75 @@ fn library_status_label(status: &str) -> Option<(&'static str, Color32)> {
 
 fn text_link(ui: &mut egui::Ui, label: &str) -> egui::Response {
     ui.link(RichText::new(label).color(Color32::from_rgb(232, 196, 96)).underline())
+}
+
+fn is_player_name(account: &str) -> bool {
+    let name = account.trim();
+    !name.is_empty()
+        && !name.eq_ignore_ascii_case("Not logged in")
+        && !name.eq_ignore_ascii_case("RuneLite")
+        && name != "NoUserNameSelected"
+}
+
+fn shown_account(anonymous: bool, account: &str) -> String {
+    if anonymous && is_player_name(account) {
+        "Hidden".to_string()
+    } else {
+        account.to_string()
+    }
+}
+
+fn account_names(clients: &[ClientWindow], runs: &[Running]) -> Vec<String> {
+    let mut names: Vec<String> = clients
+        .iter()
+        .map(|client| client.account())
+        .chain(runs.iter().map(|run| run.account.clone()))
+        .filter(|name| is_player_name(name))
+        .collect();
+    names.sort_by_key(|name| std::cmp::Reverse(name.len()));
+    names.dedup();
+    names
+}
+
+fn conceal_text(anonymous: bool, text: &str, names: &[String]) -> String {
+    if !anonymous {
+        return text.to_string();
+    }
+    let mut hidden = text.to_string();
+    for name in names {
+        hidden = hidden.replace(name, "Hidden");
+    }
+    hidden
+}
+
+fn eye_button(ui: &mut egui::Ui, rect: egui::Rect, open: bool) -> egui::Response {
+    let response = ui
+        .interact(rect, egui::Id::new("bash-license-eye"), Sense::click())
+        .on_hover_cursor(egui::CursorIcon::PointingHand);
+    if ui.is_rect_visible(rect) {
+        let color = if response.hovered() {
+            Color32::from_rgb(232, 196, 96)
+        } else {
+            Color32::from_rgb(168, 174, 182)
+        };
+        let painter = ui.painter();
+        let center = rect.center();
+        painter.add(egui::Shape::Ellipse(egui::epaint::EllipseShape {
+            center,
+            radius: egui::vec2(6.0, 3.8),
+            fill: Color32::TRANSPARENT,
+            stroke: Stroke::new(1.2_f32, color),
+        }));
+        if open {
+            painter.circle_filled(center, 1.5, color);
+        } else {
+            painter.line_segment(
+                [center - egui::vec2(4.2, 3.4), center + egui::vec2(4.2, 3.4)],
+                Stroke::new(1.2_f32, color),
+            );
+        }
+    }
+    response
 }
 
 fn license_accepted(status: &str) -> bool {

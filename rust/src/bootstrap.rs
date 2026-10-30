@@ -20,6 +20,7 @@ use crate::{
     locks,
     log::{log_line, log_path, set_log_name},
     paths::{self, SimbaPaths},
+    profile,
     state::{self, BashState},
     ui, versions, DISCORD_URL,
 };
@@ -503,20 +504,35 @@ fn run_worker(opts: &Options, worker: Worker) {
             }
         }
 
-        // Lock check
+        // RemoteInput injects into every RuneLite client, so library swaps need
+        // every RuneLite closed — not only the ones Restart Manager already sees.
+        let needs_libs = pending.iter().any(|item| matches!(item.action, Action::Package { .. }));
         let mut lockers = locks::find_update_lockers(&paths, needs_simba);
-        if !lockers.is_empty() {
+        let runelite_open = needs_libs && profile::runelite_running();
+        let mut skip_update = false;
+        if runelite_open || !lockers.is_empty() {
             let mut names: Vec<String> = lockers.iter().map(|l| l.friendly_name()).collect();
+            if runelite_open {
+                names.push("RuneLite".into());
+            }
             names.sort();
             names.dedup();
             let body = format!(
-                "{} {} using B.A.S.H files and must be closed before updating.\n\nClose {} and update now?",
+                "{} {} using B.A.S.H files and must be closed before updating.\n\n\
+                 RuneLite holds the RemoteInput plugin open. Every RuneLite client will be closed.\n\n\
+                 Close {} and update now?",
                 names.join(" and "),
                 if names.len() == 1 { "is" } else { "are" },
                 if names.len() == 1 { "it" } else { "them" }
             );
             if worker.ask(body, "Close and update", "Skip update") {
                 worker.status(format!("Closing {}...", names.join(", ")));
+                if runelite_open
+                    || names.iter().any(|name| name.eq_ignore_ascii_case("RuneLite") || name.contains("RuneLite"))
+                {
+                    let _ = profile::close_runelite();
+                    thread::sleep(Duration::from_millis(750));
+                }
                 let remaining = locks::close_processes(&lockers, Duration::from_secs(10));
                 let files = locks::watched_files(&paths, needs_simba);
                 if !remaining.is_empty() || !locks::wait_until_unlocked(&files, Duration::from_secs(15)) {
@@ -524,12 +540,30 @@ fn run_worker(opts: &Options, worker: Worker) {
                 } else {
                     lockers.clear();
                 }
+                if needs_libs && profile::runelite_running() {
+                    lockers.push(locks::Locker {
+                        pid: 0,
+                        app_name: "RuneLite".into(),
+                        exe_name: "RuneLite.exe".into(),
+                    });
+                }
+            } else {
+                skip_update = true;
             }
         }
 
-        if !lockers.is_empty() {
-            let names: Vec<String> = lockers.iter().map(|l| l.friendly_name()).collect();
-            worker.status(format!("Update skipped: {} still running.", names.join(", ")));
+        if skip_update || !lockers.is_empty() || (needs_libs && profile::runelite_running()) {
+            let mut names: Vec<String> = lockers.iter().map(|l| l.friendly_name()).collect();
+            if needs_libs && profile::runelite_running() {
+                names.push("RuneLite".into());
+            }
+            names.sort();
+            names.dedup();
+            if names.is_empty() {
+                worker.status("Update skipped.");
+            } else {
+                worker.status(format!("Update skipped: {} still running.", names.join(", ")));
+            }
         } else {
             let (ptx, bridge) = worker.progress_sender();
             let total = pending.len().max(1) as f32;

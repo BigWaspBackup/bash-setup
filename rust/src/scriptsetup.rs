@@ -22,8 +22,10 @@ pub fn load(configs: &Path, script: &str, account: &str) -> HashMap<String, Stri
     match spec.file {
         Some(file) => {
             let text = std::fs::read_to_string(configs.join(file)).unwrap_or_default();
+            let account_section = format!("{account}{}", spec.suffix);
             for row in spec.rows {
-                let section = ini_section(&text, row.section);
+                let section_name = if spec.suffix.is_empty() { row.section } else { account_section.as_str() };
+                let section = ini_section(&text, section_name);
                 if let Some(value) = ini_get(&section, row.key) {
                     values.insert(row.key.to_string(), value);
                 }
@@ -46,21 +48,33 @@ pub fn save(configs: &Path, script: &str, account: &str, values: &HashMap<String
     let Some(spec) = spec_for(script) else {
         return Ok(());
     };
+    if spec.keys.is_empty() && spec.rows.is_empty() {
+        return Ok(());
+    }
     if let Some(file) = spec.file {
         let path = configs.join(file);
         let existing = std::fs::read_to_string(&path).unwrap_or_default();
         let mut next = existing;
-        let mut sections: Vec<&str> = spec.rows.iter().map(|row| row.section).collect();
-        sections.sort_unstable();
-        sections.dedup();
-        for section in sections {
+        if spec.suffix.is_empty() {
+            let mut sections: Vec<&str> = spec.rows.iter().map(|row| row.section).collect();
+            sections.sort_unstable();
+            sections.dedup();
+            for section in sections {
+                let pairs: Vec<(&str, String)> = spec
+                    .rows
+                    .iter()
+                    .filter(|row| row.section == section)
+                    .map(|row| (row.key, values.get(row.key).cloned().unwrap_or_default()))
+                    .collect();
+                next = write_section(&next, section, &pairs);
+            }
+        } else {
             let pairs: Vec<(&str, String)> = spec
                 .rows
                 .iter()
-                .filter(|row| row.section == section)
                 .map(|row| (row.key, values.get(row.key).cloned().unwrap_or_default()))
                 .collect();
-            next = write_section(&next, section, &pairs);
+            next = write_section(&next, &format!("{account}{}", spec.suffix), &pairs);
         }
         return std::fs::write(path, next).map_err(|error| format!("Could not save the script settings: {error}"));
     }
@@ -111,7 +125,13 @@ pub fn show(ui: &mut Ui, script: &str, values: &mut HashMap<String, String>) {
         Kind::Smelt => smelt_page(ui, values),
         Kind::Bank => bank_page(ui, values),
         Kind::Lunar => lunar_page(ui, values),
-        Kind::Rows => rows_page(ui, spec.rows, values),
+        Kind::Rows => {
+            if spec.rows.is_empty() {
+                ui.label("Accounts, antiban, and webhooks are on the other tabs.");
+            } else {
+                rows_page(ui, spec.rows, values);
+            }
+        }
     }
 }
 
@@ -810,6 +830,17 @@ const fn global(names: &'static [&'static str], file: &'static str, rows: &'stat
     Spec { names, suffix: "", file: Some(file), keys: &[], rows, kind: Kind::Rows }
 }
 
+/// Per-account section inside a file other than BASettings.ini.
+const fn account_file(
+    names: &'static [&'static str],
+    file: &'static str,
+    suffix: &'static str,
+    keys: &'static [&'static str],
+    rows: &'static [Row],
+) -> Spec {
+    Spec { names, suffix, file: Some(file), keys, rows, kind: Kind::Rows }
+}
+
 const FISH_KEYS: &[&str] = &["Location", "Method", "Mode", "EnableFarmRuns", "EnableBirdhouseRuns", "BankReturnMethod"];
 const MINE_KEYS: &[&str] = &["Ore", "Location", "Mode", "EnableFarmRuns", "EnableBirdhouseRuns", "BankReturnMethod"];
 const WOOD_KEYS: &[&str] = &[
@@ -1066,6 +1097,155 @@ static SPECS: &[Spec] = &[
                 "How to enter your player-owned house when Bank or Travel needs the POH.",
             ),
         ],
+    ),
+    rows(
+        &["Free Anvil Smither"],
+        " Free Anvil Smither Settings",
+        &["Metal", "Item"],
+        &[
+            tip(choice("Metal", "Metal", &["Bronze", "Iron", "Steel", "Mithril", "Adamant", "Rune"]), "Bar type to smith. Bars need to be in the bank."),
+            tip(
+                choice(
+                    "Item",
+                    "Item",
+                    &[
+                        "Dagger", "Sword", "Scimitar", "Mace", "Longsword", "Battleaxe", "Warhammer", "2h sword", "Axe", "Platebody",
+                        "Platelegs", "Plateskirt", "Chainbody", "Kiteshield", "Sq shield", "Full helm", "Med helm", "Nails", "Arrowtips",
+                        "Dart tip", "Knife", "Javelin heads", "Bolts (unf)", "Claws", "Limbs", "Wire",
+                    ],
+                ),
+                "Item to smith at the Varrock west anvils.",
+            ),
+        ],
+    ),
+    rows(
+        &["Free Agility"],
+        " Free Agility Settings",
+        &["Course"],
+        &[tip(
+            choice("Course", "Course", &["Draynor Village Rooftop", "Varrock Rooftop", "Falador Rooftop"]),
+            "Rooftop course to run.",
+        )],
+    ),
+    rows(
+        &["Redwood Cutter"],
+        " Redwood Cutter Settings",
+        &["Mode", "FletchItem"],
+        &[
+            tip(choice("Mode", "Mode", &["Powercut", "Bank", "Fletch and drop", "Fletch and bank"]), "What to do with the logs."),
+            tip(
+                choice("FletchItem", "Fletch", &["Arrow shaft", "Redwood shield", "Redwood hiking staff"]),
+                "Item to fletch when the mode includes fletching.",
+            ),
+        ],
+    ),
+    rows(
+        &["Auburnvale Sawmill Plank Maker"],
+        " Auburnvale Sawmill Settings",
+        &["LogsOptIndex", "PlankGoal", "ScriptMode", "EnableFarmRuns", "EnableBirdhouseRuns", "BankReturnMethod"],
+        &[
+            tip(
+                index("LogsOptIndex", "Logs", &["Logs", "Oak logs", "Teak logs", "Mahogany logs", "Camphor logs", "Ironwood logs", "Rosewood logs"], 1),
+                "Logs to turn into planks.",
+            ),
+            tip(number("PlankGoal", "Planks to make (0 keeps going)", "0"), "Stop after this many planks. 0 keeps going."),
+            tip(choice("ScriptMode", "Speed", &["Fast", "Normal"]), "Fast is quicker and can miss a click. Normal waits longer between actions."),
+            tip(check("EnableFarmRuns", "Farm runs", false), TIP_FARM),
+            tip(check("EnableBirdhouseRuns", "Birdhouse runs", false), TIP_BIRD),
+            tip(
+                choice(
+                    "BankReturnMethod",
+                    "Return method",
+                    &["Runes", "Basic quetzal whistle", "Enhanced quetzal whistle", "Perfected quetzal whistle", "Perfected quetzal whistle(i)"],
+                ),
+                TIP_RETURN,
+            ),
+        ],
+    ),
+    rows(
+        &["Cannonball Smelter"],
+        " Cannonball Smelter Settings",
+        &["CannonBallType"],
+        &[tip(
+            index(
+                "CannonBallType",
+                "Cannonball",
+                &["Bronze Cannonballs", "Iron Cannonballs", "Steel Cannonballs", "Mithril Cannonballs", "Adamant Cannonballs", "Rune Cannonballs"],
+                2,
+            ),
+            "Cannonball type to smelt at Edgeville.",
+        )],
+    ),
+    rows(
+        &["Salt Miner"],
+        " Salt Miner Settings",
+        &["BasaltOnly", "StonyBasalt", "IcyBasalt", "TeSalt", "EfhSalt", "UrtSalt"],
+        &[
+            tip(check("BasaltOnly", "Basalt only", false), "Mine and note basalt without crafting salts."),
+            tip(number("StonyBasalt", "Stony basalt", "10"), "How much stony basalt to craft. 0 skips it."),
+            tip(number("IcyBasalt", "Icy basalt", "10"), "How much icy basalt to craft. 0 skips it."),
+            tip(number("TeSalt", "Te salt", "10"), "How much te salt to craft. 0 skips it."),
+            tip(number("EfhSalt", "Efh salt", "1000"), "How much efh salt to craft. 0 skips it."),
+            tip(number("UrtSalt", "Urt salt", "1000"), "How much urt salt to craft. 0 skips it."),
+        ],
+    ),
+    rows(
+        &["Volcanic Ash Miner"],
+        " Volcanic Ash Miner Settings",
+        &[
+            "StopAtCount", "UseSouthSide", "UseNorthSide", "EnableSlowMode", "EnablePlayerDetection", "PlayerDetectionDelay", "EnablePreHover",
+        ],
+        &[
+            tip(number("StopAtCount", "Stop at ash count (0 keeps going)", "0"), "Stop after mining this much volcanic ash. 0 keeps going."),
+            tip(check("UseSouthSide", "South side", true), "Mine the south side of the crater."),
+            tip(check("UseNorthSide", "North side", false), "Mine the north side of the crater."),
+            tip(check("EnableSlowMode", "Slow mode", false), "Wait longer between clicks."),
+            tip(check("EnablePlayerDetection", "Hop when another player is nearby", false), "Hop if another player stays nearby."),
+            tip(choice("PlayerDetectionDelay", "Seconds before hopping", &["0", "10", "20", "30"]), "How long another player can stay nearby before hopping."),
+            tip(check("EnablePreHover", "Hover the next ash", true), "Move the mouse onto the next ash while mining."),
+        ],
+    ),
+    global(
+        &["Calcified Mining"],
+        "BASettings.ini",
+        &[
+            tip(filed("Calcified Mining Settings", "PowerMining", "Power mine", RowKind::Check(false)), "Drop the deposits instead of banking them."),
+            tip(
+                filed("Calcified Mining Settings", "IgnoreWaterfalls", "Ignore waterfalls", RowKind::Check(false)),
+                "Keep mining when a waterfall is in the way.",
+            ),
+        ],
+    ),
+    rows(
+        &["Trouble Brewing Minigame"],
+        " BATrouble Brewing",
+        &["TeamSelection", "Method", "PowerFletch", "StopAtPointsLimit"],
+        &[
+            tip(choice("TeamSelection", "Team", &["Red", "Blue", "Random"]), "Which team to join."),
+            tip(choice("Method", "Method", &["Scrapy Bark", "Buckets"]), "How to earn points."),
+            tip(check("PowerFletch", "Power fletch", false), "Fletch bowls without waiting on the minigame."),
+            tip(check("StopAtPointsLimit", "Stop at the points cap", false), "Stop when the bucket points cap is reached."),
+        ],
+    ),
+    account_file(
+        &["Ironwood WoodCutter"],
+        "BAIronwoodSettings.ini",
+        " Ironwood Script Settings",
+        &["PreferPopulatedTrees", "PowerCut"],
+        &[
+            tip(check("PreferPopulatedTrees", "Prefer populated trees", true), "Chop trees that already have other players nearby."),
+            tip(check("PowerCut", "Power cut", false), "Drop the logs instead of banking them."),
+        ],
+    ),
+    rows(&["Ardy Superheat Iron"], "", &[], &[]),
+    rows(&["Barronite Miner"], "", &[], &[]),
+    rows(&["Free High Alchemy"], "", &[], &[]),
+    rows(&["Infected Roots Chopper"], "", &[], &[]),
+    rows(
+        &["Standalone Farm and Birdhouse Runs"],
+        "",
+        &[],
+        &[],
     ),
 ];
 
