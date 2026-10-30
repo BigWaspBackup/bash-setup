@@ -1,8 +1,8 @@
 (* Thank you for choosing B.A.S.H - BigAussie Script House *)
 (* Discord: https://discord.gg/qsmKs5uKfR *)
 
-(* To start simply double click the green play button. *)
+(* Use the B.A.S.H desktop shortcut to open BASH Launcher 2.0 (BASH.exe). *)
+(* That is how you update libs, install scripts, and run them. *)
 
 begin
-  SimbaRunInTab(ScriptPath + 'bash-launcher.simba');
 end.

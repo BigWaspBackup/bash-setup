@@ -116,16 +116,16 @@ impl SimbaPaths {
     }
 }
 
-/// Body written to `Data\default.simba` so pressing play on a blank Simba
-/// opens the launcher.
+/// Body written to `Data\default.simba`. Users should open BASH Launcher 2.0
+/// via the desktop shortcut (`BASH.exe`), not this Simba tab.
 pub fn default_simba_body() -> String {
     format!(
         "(* Thank you for choosing B.A.S.H - BigAussie Script House *)\n\
          (* Discord: {} *)\n\n\
-         (* To start simply double click the green play button. *)\n\n\
-         begin\n  SimbaRunInTab(ScriptPath + '{}');\nend.\n",
-        crate::DISCORD_URL,
-        LAUNCHER_FILE
+         (* Use the B.A.S.H desktop shortcut to open BASH Launcher 2.0 (BASH.exe). *)\n\
+         (* That is how you update libs, install scripts, and run them. *)\n\n\
+         begin\nend.\n",
+        crate::DISCORD_URL
     )
 }
 
