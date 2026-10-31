@@ -182,6 +182,10 @@ pub struct Launcher {
     remote_input: bool,
     /// When on, the real mouse and keyboard are ignored while a script runs.
     block_real_input: bool,
+    /// Save a short client video when a script stops. Stored in wasplib.json.
+    record_crashes: bool,
+    /// How many seconds of the client the crash video keeps.
+    record_seconds: i32,
     /// RuneLite account names are shown as Hidden outside account settings.
     anonymous: bool,
     /// Accepted license key is visible until the launcher is closed.
@@ -254,6 +258,8 @@ impl Launcher {
             theme: chrome::Theme::Dark,
             remote_input: true,
             block_real_input: true,
+            record_crashes: false,
+            record_seconds: 30,
             anonymous: false,
             show_license: false,
             run_after_update: None,
@@ -282,9 +288,12 @@ impl Launcher {
         self.anchor_output = state.anchor_output;
         self.theme = chrome::Theme::from_saved(&state.theme);
         let remote = crate::wasplib::load(&self.paths.wasplib_config());
+        let recording = crate::wasplib::load_recording(&self.paths.wasplib_config());
         self.anonymous = state.anonymous;
         self.remote_input = remote.enabled;
         self.block_real_input = remote.block_real_input;
+        self.record_crashes = recording.enabled;
+        self.record_seconds = recording.seconds;
         self.profile_prompt_open = !state.prompted_profile && !profile::is_installed(&self.install_id);
         if let Some(client_open) = profile::fix_launcher_scale() {
             self.status = if client_open {
@@ -632,6 +641,38 @@ impl Launcher {
                 }
                 ui.add_space(10.0);
 
+                ui.label(RichText::new("Crash recording").strong());
+                let record_note = "Saves a short video of the client when a script stops, so a crash can be watched afterwards. Videos go in Data\\BashLib\\videos. This uses extra CPU, so leave it off unless you are debugging.";
+                let galley = egui::WidgetText::from(RichText::new(record_note).weak().size(12.0)).into_galley(
+                    ui,
+                    Some(egui::TextWrapMode::Wrap),
+                    440.0,
+                    egui::TextStyle::Body,
+                );
+                ui.add(Label::new(galley));
+                ui.add_space(4.0);
+                if ui.checkbox(&mut self.record_crashes, "Record crashes").changed() {
+                    self.save_recording();
+                }
+                ui.horizontal(|ui| {
+                    ui.label("Seconds");
+                    if ui
+                        .add_enabled(
+                            self.record_crashes,
+                            egui::DragValue::new(&mut self.record_seconds).range(5..=99).speed(1.0),
+                        )
+                        .changed()
+                    {
+                        self.save_recording();
+                    }
+                });
+                if ui.button("Open recordings").clicked() {
+                    let videos = self.paths.data().join("BashLib").join("videos");
+                    let _ = std::fs::create_dir_all(&videos);
+                    action = Some(ExtraAction::Open(videos));
+                }
+                ui.add_space(10.0);
+
                 ui.label(RichText::new("Folders").strong());
                 ui.horizontal_wrapped(|ui| {
                     if ui.button("Script screenshots").on_hover_text("Screenshots saved by scripts").clicked() {
@@ -732,6 +773,20 @@ impl Launcher {
             let fresh = crate::wasplib::load(&self.paths.wasplib_config());
             self.remote_input = fresh.enabled;
             self.block_real_input = fresh.block_real_input;
+            self.status = message;
+        }
+    }
+
+    fn save_recording(&mut self) {
+        self.record_seconds = self.record_seconds.clamp(5, 99);
+        let settings = crate::wasplib::CrashRecording {
+            enabled: self.record_crashes,
+            seconds: self.record_seconds,
+        };
+        if let Err(message) = crate::wasplib::save_recording(&self.paths.wasplib_config(), settings) {
+            let fresh = crate::wasplib::load_recording(&self.paths.wasplib_config());
+            self.record_crashes = fresh.enabled;
+            self.record_seconds = fresh.seconds;
             self.status = message;
         }
     }
