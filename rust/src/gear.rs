@@ -1106,32 +1106,24 @@ fn sets_json(sets: &[Set]) -> String {
     for (set_index, set) in sets.iter().enumerate() {
         out.push_str("  ");
         out.push_str(&serde_json::Value::String(set.name.clone()).to_string());
-        out.push_str(": {");
-        let filled: Vec<(&str, &str)> = SLOT_KEYS
-            .iter()
-            .filter_map(|key| {
-                set.slots.get(*key).and_then(|value| {
-                    let value = value.trim();
-                    if is_blank(value) { None } else { Some((*key, value)) }
-                })
-            })
-            .collect();
-        if filled.is_empty() {
-            out.push('}');
-        } else {
-            out.push('\n');
-            for (item_index, (key, value)) in filled.iter().enumerate() {
-                out.push_str("    ");
-                out.push_str(&serde_json::Value::String((*key).to_string()).to_string());
-                out.push_str(": ");
-                out.push_str(&serde_json::Value::String((*value).to_string()).to_string());
-                if item_index + 1 != filled.len() {
-                    out.push(',');
-                }
-                out.push('\n');
+        out.push_str(": {\n");
+        for (item_index, key) in SLOT_KEYS.iter().enumerate() {
+            let value = set
+                .slots
+                .get(*key)
+                .map(|value| value.trim())
+                .filter(|value| !is_blank(value))
+                .unwrap_or("None");
+            out.push_str("    ");
+            out.push_str(&serde_json::Value::String((*key).to_string()).to_string());
+            out.push_str(": ");
+            out.push_str(&serde_json::Value::String(value.to_string()).to_string());
+            if item_index + 1 != SLOT_KEYS.len() {
+                out.push(',');
             }
-            out.push_str("  }");
+            out.push('\n');
         }
+        out.push_str("  }");
         if set_index + 1 != sets.len() {
             out.push(',');
         }

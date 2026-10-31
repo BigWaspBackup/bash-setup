@@ -1,6 +1,6 @@
 [package]
 name = "bash-setup"
-version = "2.1.0"
+version = "2.1.1"
 edition = "2021"
 authors = ["BigAussie"]
 description = "BASH Launcher 2.0 — Windows installer (bash-setup.exe) and launcher (BASH.exe) for Simba, SRL-B, BashLib and scripts"

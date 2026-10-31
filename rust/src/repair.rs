@@ -42,7 +42,6 @@ pub const STEPS: &[&str] = &[
     "Adds Windows Defender exclusions for the Simba install folders.",
     "Installs the Visual C++ 2015-2022 runtime if it is missing.",
     "Sets .simba files to open with Simba64.exe.",
-    "A local developer copy of SRL-B or BashLib is linked again. The folder it points at is not deleted.",
 ];
 
 enum RepairMsg {
@@ -51,6 +50,7 @@ enum RepairMsg {
     Failed(String),
 }
 
+#[allow(dead_code)]
 enum Preserved {
     Junction { name: &'static str, target: PathBuf },
     Directory { name: &'static str, held: PathBuf },
@@ -60,6 +60,7 @@ struct RepairPaths {
     simba: SimbaPaths,
     force_update: PathBuf,
     backups: PathBuf,
+    #[allow(dead_code)]
     hold: PathBuf,
     restore: PathBuf,
     runelite_home: PathBuf,
@@ -251,7 +252,6 @@ fn execute(setup: Option<PathBuf>, mut report: impl FnMut(&str, f32)) -> Result<
     note("Flushing the DNS cache.", 0.18);
     let _ = hidden("ipconfig").arg("/flushdns").status();
 
-    note("Setting local SRL-B and BashLib copies aside.", 0.2);
     let preserved = preserve_dev_libraries(&paths)?;
     let preserved_record = paths.force_update.join("preserved-links.txt");
     write_preserved_record(&preserved_record, &preserved)?;
@@ -290,7 +290,6 @@ fn execute(setup: Option<PathBuf>, mut report: impl FnMut(&str, f32)) -> Result<
         }
     }
 
-    note("Linking local SRL-B and BashLib copies again.", 0.48);
     if let Err(error) = restore_preserved(&paths, &preserved) {
         return Err(format!(
             "{error} The backup is at {}. Simba was not reinstalled.",
@@ -532,38 +531,8 @@ fn add_defender_exclusions(paths: &RepairPaths) {
     }
 }
 
-fn preserve_dev_libraries(paths: &RepairPaths) -> Result<Vec<Preserved>, String> {
-    let mut saved = Vec::new();
-    for name in [paths::SRLB_DIR, paths::BASHLIB_DIR] {
-        let dir = paths.simba.include(name);
-        let meta = match fs::symlink_metadata(&dir) {
-            Ok(meta) => meta,
-            Err(_) => continue,
-        };
-        if meta.file_type().is_symlink() {
-            let target = fs::read_link(&dir).map_err(|e| format!("Could not read the {name} link: {e}"))?;
-            saved.push(Preserved::Junction {
-                name,
-                target: normalize_link(&target),
-            });
-            continue;
-        }
-        if dir.join(".git").exists() {
-            fs::create_dir_all(&paths.hold).map_err(|e| format!("Could not create the hold folder: {e}"))?;
-            let held = paths.hold.join(name);
-            if held.exists() {
-                return Err(format!(
-                    "{name} could not be moved aside because {} already exists. Nothing was deleted.",
-                    held.display()
-                ));
-            }
-            fs::rename(&dir, &held).map_err(|e| {
-                format!("Could not move {name} aside, so nothing was deleted: {e}")
-            })?;
-            saved.push(Preserved::Directory { name, held });
-        }
-    }
-    Ok(saved)
+fn preserve_dev_libraries(_paths: &RepairPaths) -> Result<Vec<Preserved>, String> {
+    Ok(Vec::new())
 }
 
 fn put_back_moved(paths: &RepairPaths, saved: &[Preserved]) -> Result<(), String> {
@@ -691,9 +660,6 @@ fn restore_user_files(paths: &RepairPaths) -> Result<(), String> {
     }
     copy_if_file(&paths.restore.join("state.json"), &paths.simba.state_file())?;
     let bashlib = paths.simba.include(paths::BASHLIB_DIR);
-    if versions::is_dev_checkout(&bashlib) {
-        return Ok(());
-    }
     let overrides = paths.restore.join("overrides.simba");
     if overrides.is_file() {
         fs::create_dir_all(&bashlib).map_err(|e| format!("Could not create BashLib: {e}"))?;
@@ -995,6 +961,7 @@ fn write_preserved_record(path: &Path, saved: &[Preserved]) -> Result<(), String
     fs::write(path, lines.join("\n")).map_err(|e| format!("Could not record local library links: {e}"))
 }
 
+#[allow(dead_code)]
 fn normalize_link(path: &Path) -> PathBuf {
     let text = path.to_string_lossy();
     let trimmed = text

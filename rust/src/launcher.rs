@@ -661,7 +661,7 @@ impl Launcher {
                     }
                     if ui
                         .add_enabled(!self.script_running(), Button::new("Reinstall libraries"))
-                        .on_hover_text("Download SRL-B and BashLib again. Local developer copies are left alone.")
+                        .on_hover_text("Download SRL-B and BashLib again.")
                         .clicked()
                     {
                         action = Some(ExtraAction::Reinstall);
@@ -817,7 +817,6 @@ impl Launcher {
                 .cloned()
                 .unwrap_or_else(|| if component.track.is_empty() { "latest".into() } else { component.track.clone() });
             let selected = release_choice_label(&choice, &list);
-            let local = component.dev_checkout;
             ui.horizontal(|ui| {
                 ui.add_enabled_ui(!list.is_empty(), |ui| {
                     egui::ComboBox::from_id_salt(format!("lib-{name}"))
@@ -833,12 +832,10 @@ impl Launcher {
                             }
                         });
                 });
-                let busy = local || self.script_running() || !self.installing_lib.is_empty() || list.is_empty();
+                let busy = self.script_running() || !self.installing_lib.is_empty() || list.is_empty();
                 let label = if self.installing_lib == name { "Installing..." } else { "Install" };
                 let mut button = ui.add_enabled(!busy, Button::new(label));
-                if local {
-                    button = button.on_disabled_hover_text("Local developer copy is left alone.");
-                } else if self.script_running() {
+                if self.script_running() {
                     button = button.on_disabled_hover_text("Stop the running script first.");
                 }
                 if button.clicked() {
@@ -877,12 +874,6 @@ impl Launcher {
             return;
         }
         if !self.installing_lib.is_empty() {
-            return;
-        }
-        let state = crate::state::BashState::load(&self.paths.state_file());
-        let component = if name == "SRL-B" { &state.srlb } else { &state.bashlib };
-        if component.dev_checkout {
-            self.status = format!("{name} is a local copy and was left alone.");
             return;
         }
         let choice = self.release_choice.get(name).cloned().unwrap_or_else(|| "latest".into());
@@ -2966,9 +2957,6 @@ fn script_in_category(script: &ScriptEntry, category: &str, skill: &str) -> bool
 }
 
 fn library_track_note(component: &crate::state::ComponentState) -> String {
-    if component.dev_checkout {
-        return String::new();
-    }
     if component.track == "dev" {
         let installed = if component.installed.is_empty() { "not installed" } else { component.installed.as_str() };
         return format!("{installed} · dev");
@@ -3046,12 +3034,7 @@ fn resolve_library_install(name: &str, choice: &str, list: &[versions::ListedRel
 
 fn install_library_release(paths: &SimbaPaths, name: &str, spec: &LibInstall) -> Result<(), String> {
     let client = crate::download::client(versions::USER_AGENT)?;
-    match crate::install::install_package(&client, paths, name, &spec.zip_url, None, (0.0, 1.0))? {
-        crate::install::PackageInstallResult::SkippedDevCheckout => {
-            return Err(format!("{name} is a local copy and was left alone."));
-        }
-        crate::install::PackageInstallResult::Installed => {}
-    }
+    crate::install::install_package(&client, paths, name, &spec.zip_url, None, (0.0, 1.0))?;
     let mut state = crate::state::BashState::load(&paths.state_file());
     let component = if name == "SRL-B" { &mut state.srlb } else { &mut state.bashlib };
     component.track = spec.track.clone();
@@ -3066,7 +3049,7 @@ fn install_library_release(paths: &SimbaPaths, name: &str, spec: &LibInstall) ->
     } else {
         component.dev_tag.clear();
     }
-    component.dev_checkout = versions::is_dev_checkout(&paths.include(name));
+    component.dev_checkout = false;
     crate::state::write_library_status(&mut state, false);
     state.save(&paths.state_file())?;
     Ok(())

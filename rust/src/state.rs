@@ -34,9 +34,6 @@ pub struct ComponentState {
 impl ComponentState {
     /// True when Update libraries should change this component.
     pub fn is_behind(&self) -> bool {
-        if self.dev_checkout {
-            return false;
-        }
         if self.track.is_empty() {
             return !self.latest.is_empty() && self.installed != self.latest;
         }
@@ -172,13 +169,13 @@ mod tests {
     }
 
     #[test]
-    fn a_local_copy_is_never_behind() {
+    fn a_newer_release_is_behind_even_for_a_local_folder() {
         let local = ComponentState {
             installed: "8.4.10".into(),
             latest: "8.4.14".into(),
             dev_checkout: true,
             ..ComponentState::default()
         };
-        assert!(!local.is_behind());
+        assert!(local.is_behind());
     }
 }

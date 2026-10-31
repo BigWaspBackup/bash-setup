@@ -63,7 +63,7 @@ pub fn clean_stale(paths: &SimbaPaths) {
     for include in [paths::SRLB_DIR, paths::BASHLIB_DIR] {
         for suffix in [".old", ".new"] {
             let stale = paths.includes().join(format!("{include}{suffix}"));
-            if stale.exists() && !versions::is_dev_checkout(&stale) {
+            if stale.exists() {
                 let _ = remove_dir_retry(&stale);
             }
         }
@@ -113,7 +113,6 @@ pub fn write_data_files(paths: &SimbaPaths) -> Result<(), String> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PackageInstallResult {
     Installed,
-    SkippedDevCheckout,
 }
 
 /// Download a release zip and atomically swap it into `Includes\<name>`.
@@ -128,11 +127,6 @@ pub fn install_package(
     progress_range: (f32, f32),
 ) -> Result<PackageInstallResult, String> {
     let target = paths.include(name);
-    if versions::is_dev_checkout(&target) {
-        status(tx, format!("{name}: developer checkout detected, not touching it."));
-        return Ok(PackageInstallResult::SkippedDevCheckout);
-    }
-
     let staging = paths.includes().join(format!("{name}.new"));
     let old = paths.includes().join(format!("{name}.old"));
     let zip_path = paths.downloads().join(format!("{name}.zip"));

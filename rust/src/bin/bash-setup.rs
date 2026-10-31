@@ -414,7 +414,7 @@ fn run_installation(paths: SimbaPaths, tx: ProgressSender, silent: bool) {
         let component = if idx == 0 { &mut state.srlb } else { &mut state.bashlib };
         component.installed = installed;
         component.latest = version;
-        component.dev_checkout = versions::is_dev_checkout(&paths.include(name));
+        component.dev_checkout = false;
     }
 
     // Launcher

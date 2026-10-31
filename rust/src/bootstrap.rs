@@ -25,13 +25,14 @@ use crate::{
     ui, versions, DISCORD_URL,
 };
 use eframe::egui;
-use egui::{Align, Button, CentralPanel, Color32, Layout, ProgressBar, RichText};
+use egui::{Align, Button, CentralPanel, Color32, Label, Layout, ProgressBar, RichText, ScrollArea, Stroke};
 
 #[derive(Debug, Clone)]
 struct Question {
     body: String,
     yes_label: String,
     no_label: String,
+    changelog: String,
 }
 
 #[derive(Debug, Clone)]
@@ -137,6 +138,10 @@ impl Worker {
     }
 
     fn ask(&self, body: impl Into<String>, yes: &str, no: &str) -> bool {
+        self.ask_with_changelog(body, yes, no, String::new())
+    }
+
+    fn ask_with_changelog(&self, body: impl Into<String>, yes: &str, no: &str, changelog: String) -> bool {
         if self.silent {
             return true;
         }
@@ -144,6 +149,7 @@ impl Worker {
             body: body.into(),
             yes_label: yes.to_string(),
             no_label: no.to_string(),
+            changelog,
         }));
         self.answers.recv().unwrap_or(false)
     }
@@ -212,7 +218,12 @@ fn offer_launcher_restart(
     } else {
         format!("A new launcher update ({latest}) has been downloaded.\n\nRestart now to install it?")
     };
-    if !worker.ask(body, "Yes", "No") {
+    let changelog = versions::latest_release_notes(versions::SETUP_REPO.0, versions::SETUP_REPO.1)
+        .unwrap_or_else(|error| {
+            log_line(&format!("launcher changelog: {error}"));
+            "Could not load the changelog.".to_string()
+        });
+    if !worker.ask_with_changelog(body, "Yes", "No", changelog) {
         return false;
     }
     if staged && !install::finish_self_update(paths) {
@@ -391,15 +402,10 @@ fn run_worker(opts: &Options, worker: Worker) {
         // Libraries
         for (name, repo) in [(paths::SRLB_DIR, versions::SRLB_REPO), (paths::BASHLIB_DIR, versions::BASHLIB_REPO)] {
             let include = paths.include(name);
-            let dev = versions::is_dev_checkout(&include);
             let installed = versions::installed_lib_version(&include).unwrap_or_default();
             let component = if name == paths::SRLB_DIR { &mut state.srlb } else { &mut state.bashlib };
             component.installed = installed.clone();
-            component.dev_checkout = dev;
-            if dev {
-                log_line(&format!("{name}: developer checkout, skipping"));
-                continue;
-            }
+            component.dev_checkout = false;
             match versions::library_target(client, no_redirect, repo.0, repo.1, &component.track) {
                 Ok(Some(target)) => {
                     component.latest = target.stable_version.clone();
@@ -641,7 +647,7 @@ fn run_worker(opts: &Options, worker: Worker) {
         let note = if offline {
             "Could not reach GitHub, so the libraries were not reinstalled."
         } else {
-            "SRL-B and BashLib are local copies, so they were left alone."
+            "No SRL-B or BashLib release was found."
         };
         let _ = worker.tx.send(WorkerMsg::Notice(note.to_string()));
     }
@@ -675,6 +681,7 @@ struct BashApp {
     launcher_started: bool,
     resized: bool,
     centered: bool,
+    prompt_sized: bool,
     startup_theme: Option<ui::Theme>,
 }
 
@@ -804,22 +811,38 @@ impl eframe::App for BashApp {
                         }
                     });
                 } else if let Some(q) = self.question.clone() {
-                    ui.label(&q.body);
-                    ui.add_space(12.0);
-                    ui.horizontal(|ui| {
-                        if ui.add_sized([150.0, 32.0], Button::new(&q.yes_label)).clicked() {
-                            if let Some(tx) = &self.answer_tx {
-                                let _ = tx.send(true);
-                            }
-                            self.question = None;
+                    if !q.changelog.is_empty() && !self.prompt_sized {
+                        ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(520.0, 560.0)));
+                        self.prompt_sized = true;
+                    }
+                    ui.add(Label::new(RichText::new(&q.body)).wrap());
+                    ui.add_space(14.0);
+                    let yes_clicked = centered_choice(ui, &q.yes_label, &q.no_label);
+                    if yes_clicked == Some(true) {
+                        if let Some(tx) = &self.answer_tx {
+                            let _ = tx.send(true);
                         }
-                        if ui.add_sized([150.0, 32.0], Button::new(&q.no_label)).clicked() {
-                            if let Some(tx) = &self.answer_tx {
-                                let _ = tx.send(false);
-                            }
-                            self.question = None;
+                        self.question = None;
+                    } else if yes_clicked == Some(false) {
+                        if let Some(tx) = &self.answer_tx {
+                            let _ = tx.send(false);
                         }
-                    });
+                        self.question = None;
+                    }
+                    if !q.changelog.is_empty() {
+                        ui.add_space(16.0);
+                        ui.label(RichText::new("Changelog").strong());
+                        ui.add_space(6.0);
+                        ScrollArea::vertical()
+                            .id_salt("update-changelog")
+                            .max_height(220.0)
+                            .max_width(460.0)
+                            .show(ui, |ui| {
+                                ui.set_min_width(440.0);
+                                ui.set_max_width(440.0);
+                                ui.add(Label::new(RichText::new(&q.changelog).size(13.0)).wrap());
+                            });
+                    }
                 } else {
                     ui.label(&self.status);
                     ui.add_space(8.0);
@@ -856,8 +879,41 @@ impl BashApp {
         self.question = None;
         self.error = None;
         self.done = false;
+        self.prompt_sized = false;
         self.phase = Phase::Check;
     }
+}
+
+/// Yes on the left, No on the right, sized to their labels and centered.
+/// `Some(true)` is Yes, `Some(false)` is No.
+fn centered_choice(ui: &mut egui::Ui, yes: &str, no: &str) -> Option<bool> {
+    let height = 34.0;
+    let gap = 12.0;
+    let yes_w = choice_width(ui, yes);
+    let no_w = choice_width(ui, no);
+    let total = yes_w + no_w + gap;
+    let mut answer = None;
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = gap;
+        ui.add_space(((ui.available_width() - total) / 2.0).max(0.0));
+        let yes_button = Button::new(RichText::new(yes).strong().color(Color32::from_rgb(28, 28, 32)))
+            .fill(Color32::from_rgb(232, 196, 96))
+            .stroke(Stroke::new(1.0_f32, Color32::from_rgb(196, 156, 64)));
+        if ui.add_sized([yes_w, height], yes_button).clicked() {
+            answer = Some(true);
+        }
+        if ui.add_sized([no_w, height], Button::new(no)).clicked() {
+            answer = Some(false);
+        }
+    });
+    answer
+}
+
+fn choice_width(ui: &egui::Ui, label: &str) -> f32 {
+    let font = egui::TextStyle::Button.resolve(ui.style());
+    let text = ui.fonts(|fonts| fonts.layout_no_wrap(label.to_string(), font, Color32::WHITE));
+    let pad = ui.spacing().button_padding.x * 2.0 + 28.0;
+    (text.size().x + pad).clamp(96.0, 180.0)
 }
 
 pub fn run() {
@@ -904,6 +960,7 @@ pub fn run() {
         launcher_started: false,
         resized: false,
         centered: false,
+        prompt_sized: false,
         startup_theme: None,
     };
     let result = eframe::run_native(

@@ -3,6 +3,7 @@
 use std::{
     env, fs,
     path::{Path, PathBuf},
+    time::Duration,
 };
 
 use reqwest::blocking::Client;
@@ -122,6 +123,46 @@ pub fn latest_release(no_redirect: &Client, owner: &str, repo: &str) -> Result<O
         return Ok(None);
     }
     Err(format!("HTTP {status} from {url}"))
+}
+
+/// Notes from the newest GitHub release, with markdown headings and backticks removed.
+pub fn latest_release_notes(owner: &str, repo: &str) -> Result<String, String> {
+    let client = Client::builder()
+        .user_agent(USER_AGENT)
+        .timeout(Duration::from_secs(12))
+        .build()
+        .map_err(|e| format!("Failed to start the release client: {e}"))?;
+    let url = format!("https://api.github.com/repos/{owner}/{repo}/releases/latest");
+    let text = download::get_text(&client, &url)?;
+    let value: serde_json::Value =
+        serde_json::from_str(&text).map_err(|e| format!("Could not read the release notes: {e}"))?;
+    let body = value.get("body").and_then(|item| item.as_str()).unwrap_or("").trim();
+    if body.is_empty() {
+        return Err("This release has no notes.".into());
+    }
+    Ok(plain_release_notes(body))
+}
+
+fn plain_release_notes(body: &str) -> String {
+    let mut lines = Vec::new();
+    let mut blank = false;
+    for line in body.lines() {
+        let mut line = line.trim().to_string();
+        if line.starts_with('#') {
+            line = line.trim_start_matches('#').trim().to_string();
+        }
+        line = line.replace('`', "");
+        if line.is_empty() {
+            if !blank && !lines.is_empty() {
+                lines.push(String::new());
+                blank = true;
+            }
+            continue;
+        }
+        blank = false;
+        lines.push(line);
+    }
+    lines.join("\n")
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -275,17 +316,6 @@ pub fn installed_lib_version(include_dir: &Path) -> Option<String> {
         }
     }
     None
-}
-
-/// True when an include folder is a junction/symlink or a git checkout. Those
-/// belong to a developer and must never be replaced.
-pub fn is_dev_checkout(include_dir: &Path) -> bool {
-    if let Ok(meta) = fs::symlink_metadata(include_dir) {
-        if meta.file_type().is_symlink() {
-            return true;
-        }
-    }
-    include_dir.join(".git").exists()
 }
 
 pub fn launcher_revision_from_text(text: &str) -> Option<u32> {
@@ -487,7 +517,6 @@ pub fn refresh_library_record(paths: &SimbaPaths) {
 
     for (name, repo) in [(crate::paths::SRLB_DIR, SRLB_REPO), (crate::paths::BASHLIB_DIR, BASHLIB_REPO)] {
         let include = paths.include(name);
-        let dev = is_dev_checkout(&include);
         let installed = installed_lib_version(&include).unwrap_or_default();
         let component = if name == crate::paths::SRLB_DIR {
             &mut state.srlb
@@ -495,10 +524,7 @@ pub fn refresh_library_record(paths: &SimbaPaths) {
             &mut state.bashlib
         };
         component.installed = installed.clone();
-        component.dev_checkout = dev;
-        if dev {
-            continue;
-        }
+        component.dev_checkout = false;
         match library_target(&client, &no_redirect, repo.0, repo.1, &component.track) {
             Ok(Some(target)) => {
                 component.latest = target.stable_version;
