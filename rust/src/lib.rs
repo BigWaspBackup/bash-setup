@@ -15,6 +15,8 @@ pub mod paths;
 pub mod profile;
 pub mod repair;
 pub mod scriptprofile;
+mod salvage_data;
+pub mod salvage;
 pub mod scriptsetup;
 pub mod shops;
 pub mod skillcatalog;

@@ -39,6 +39,14 @@ pub fn load(configs: &Path, script: &str, account: &str) -> HashMap<String, Stri
                     values.insert((*key).to_string(), value);
                 }
             }
+            if spec.kind == Kind::Salvage {
+                let boat = ini_section(&text, &format!("{account} Boat Setup"));
+                for key in crate::salvage::BOAT_KEYS {
+                    if let Some(value) = ini_get(&boat, key) {
+                        values.insert((*key).to_string(), value);
+                    }
+                }
+            }
         }
     }
     values
@@ -85,7 +93,14 @@ pub fn save(configs: &Path, script: &str, account: &str, values: &HashMap<String
         .iter()
         .map(|key| (*key, values.get(*key).cloned().unwrap_or_default()))
         .collect();
-    let next = write_section(&existing, &format!("{account}{}", spec.suffix), &pairs);
+    let mut next = write_section(&existing, &format!("{account}{}", spec.suffix), &pairs);
+    if spec.kind == Kind::Salvage {
+        let boat_pairs: Vec<(&str, String)> = crate::salvage::BOAT_KEYS
+            .iter()
+            .map(|key| (*key, values.get(*key).cloned().unwrap_or_default()))
+            .collect();
+        next = write_section(&next, &format!("{account} Boat Setup"), &boat_pairs);
+    }
     std::fs::write(path, next).map_err(|error| format!("Could not save the script settings: {error}"))
 }
 
@@ -125,6 +140,7 @@ pub fn show(ui: &mut Ui, script: &str, values: &mut HashMap<String, String>) {
         Kind::Smelt => smelt_page(ui, values),
         Kind::Bank => bank_page(ui, values),
         Kind::Lunar => lunar_page(ui, values),
+        Kind::Salvage => crate::salvage::show(ui, values),
         Kind::Rows => {
             if spec.rows.is_empty() {
                 ui.label("Accounts, antiban, and webhooks are on the other tabs.");
@@ -171,6 +187,7 @@ enum Kind {
     Smelt,
     Bank,
     Lunar,
+    Salvage,
     Rows,
 }
 
@@ -790,6 +807,54 @@ fn lunar_page(ui: &mut Ui, values: &mut HashMap<String, String>) {
     checkbox_tip(ui, "Bank fillers", "Use bank fillers so the inventory layout stays consistent.", values, "BANKFILLERSCHECK", false);
 }
 
+const VALE_LOGS: &[&str] = &["Oak", "Willow", "Maple", "Yew", "Magic", "Redwood"];
+const VALE_DECOR_STANDARD: &[&str] = &["shortbow (u)", "shortbow", "longbow (u)", "longbow", "shield", "stock"];
+const VALE_DECOR_REDWOOD: &[&str] = &["hiking staff", "shield"];
+
+fn vale_log_name(values: &HashMap<String, String>) -> &'static str {
+    let index = values.get("LogsOptIndex").and_then(|value| value.parse::<usize>().ok()).unwrap_or(0);
+    VALE_LOGS.get(index).copied().unwrap_or(VALE_LOGS[0])
+}
+
+fn vale_decor_suffixes(log: &str) -> &'static [&'static str] {
+    if log.eq_ignore_ascii_case("redwood") {
+        VALE_DECOR_REDWOOD
+    } else {
+        VALE_DECOR_STANDARD
+    }
+}
+
+fn vale_decor_options(log: &str) -> Vec<String> {
+    let mut options = vec!["Fletch decor from logs".to_string()];
+    for suffix in vale_decor_suffixes(log) {
+        options.push(format!("{log} {suffix}"));
+    }
+    options
+}
+
+/// Launcher saves "Longbow (u)". The editor saves "Magic longbow (u)".
+/// Both mean the same decoration for the selected log.
+fn vale_remap_decor(saved: &str, log: &str, options: &[String]) -> String {
+    let saved = saved.trim();
+    if saved.is_empty() || saved.eq_ignore_ascii_case("fletch decor from logs") {
+        return "Fletch decor from logs".to_string();
+    }
+    let name = saved.to_ascii_lowercase();
+    let mut suffixes: Vec<&str> = VALE_DECOR_STANDARD.iter().copied().chain(VALE_DECOR_REDWOOD.iter().copied()).collect();
+    suffixes.sort_by_key(|suffix| std::cmp::Reverse(suffix.len()));
+    suffixes.dedup();
+    for suffix in suffixes {
+        if name == suffix || name.ends_with(&format!(" {suffix}")) {
+            let mapped = format!("{log} {suffix}");
+            if let Some(option) = options.iter().find(|option| option.eq_ignore_ascii_case(&mapped)) {
+                return option.clone();
+            }
+            break;
+        }
+    }
+    options.first().cloned().unwrap_or_else(|| "Fletch decor from logs".to_string())
+}
+
 fn rows_page(ui: &mut Ui, rows: &[Row], values: &mut HashMap<String, String>) {
     for row in rows {
         let farm = flag(values, "EnableFarmRuns", false)
@@ -804,7 +869,15 @@ fn rows_page(ui: &mut Ui, rows: &[Row], values: &mut HashMap<String, String>) {
                     continue;
                 }
                 let mut current = text(values, row.key);
-                choose_tip(ui, row.key, row.label, row.tip, &mut current, options);
+                if row.key == "DecorOpt" {
+                    let log = vale_log_name(values);
+                    let decor = vale_decor_options(log);
+                    current = vale_remap_decor(&current, log, &decor);
+                    let shown: Vec<&str> = decor.iter().map(String::as_str).collect();
+                    choose_tip(ui, row.key, row.label, row.tip, &mut current, &shown);
+                } else {
+                    choose_tip(ui, row.key, row.label, row.tip, &mut current, options);
+                }
                 values.insert(row.key.to_string(), current);
             }
             RowKind::Index(options, default) => {
@@ -919,7 +992,7 @@ static SPECS: &[Spec] = &[
         &["LogsOptIndex", "DecorOpt", "UseLogBasket", "EnableFarmRuns", "EnableBirdhouseRuns", "BankReturnMethod"],
         &[
             tip(index("LogsOptIndex", "Logs", &["Oak", "Willow", "Maple", "Yew", "Magic", "Redwood"], 0), "Logs used for totem decorations."),
-            tip(choice("DecorOpt", "Decoration", &["Fletch decor from logs", "Shortbow (u)", "Shortbow", "Longbow (u)", "Longbow", "Shield", "Stock", "Hiking staff"]), "Decoration placed on the totems. Fletch decor from logs makes them on the spot."),
+            tip(choice("DecorOpt", "Decoration", &["Fletch decor from logs"]), "Decoration placed on the totems. The list follows the selected logs. Redwood can only use a shield or hiking staff. Fletch decor from logs makes them on the spot."),
             tip(check("UseLogBasket", "Use a log basket", false), "Carry extra logs in a log basket when available."),
             tip(check("EnableFarmRuns", "Farm runs", false), TIP_FARM),
             tip(check("EnableBirdhouseRuns", "Birdhouse runs", false), TIP_BIRD),
@@ -1009,31 +1082,14 @@ static SPECS: &[Spec] = &[
             tip(choice("PlayerDetectionDelay", "Seconds to wait before leaving", &["0", "10", "20", "30"]), "How long another player can stay nearby before leaving."),
         ],
     ),
-    rows(
-        &["Shipwreck Salvaging"],
-        " ShipWreck Settings",
-        &["SelectedShipwreck", "UseDoubleSalvageSpots", "UseCrewmateSalvaging", "SelectedCrewmate"],
-        &[
-            tip(
-                choice(
-                    "SelectedShipwreck",
-                    "Shipwreck",
-                    &["Small shipwreck", "Fisherman's shipwreck", "Barracuda shipwreck", "Large shipwreck", "Pirate shipwreck", "Mercenary shipwreck", "Fremennik shipwreck", "Merchant shipwreck"],
-                ),
-                "Which shipwreck to salvage.",
-            ),
-            tip(check("UseDoubleSalvageSpots", "Park between two wrecks", false), "Stand between two wrecks so both can be salvaged without moving as far."),
-            tip(check("UseCrewmateSalvaging", "Crewmate on the second hook", false), "Use a crewmate on the second salvage hook."),
-            tip(
-                choice(
-                    "SelectedCrewmate",
-                    "Crewmate",
-                    &["Adventurer Ada", "Bosun Zarah", "Cabin Boy Jenkins", "Ex-Captain Siad", "Jittery Jim", "Jobless Jim", "Jolly Jim", "Oarswoman Olga", "Sailor Jakob", "Spotter Virginia"],
-                ),
-                "Crewmate used when crewmate salvaging is on.",
-            ),
-        ],
-    ),
+    Spec {
+        names: &["Shipwreck Salvaging"],
+        suffix: " ShipWreck Settings",
+        file: None,
+        keys: crate::salvage::SETTING_KEYS,
+        rows: &[],
+        kind: Kind::Salvage,
+    },
     global(
         &["Vardorvis Slayer"],
         "vardorvis.ini",
@@ -1248,4 +1304,56 @@ static SPECS: &[Spec] = &[
         &[],
     ),
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn redwood_decorations_are_only_shield_and_hiking_staff() {
+        let options = vale_decor_options("Redwood");
+        assert_eq!(
+            options,
+            vec![
+                "Fletch decor from logs".to_string(),
+                "Redwood hiking staff".to_string(),
+                "Redwood shield".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn other_logs_keep_bows_and_drop_hiking_staff() {
+        let options = vale_decor_options("Magic");
+        assert_eq!(
+            options,
+            vec![
+                "Fletch decor from logs".to_string(),
+                "Magic shortbow (u)".to_string(),
+                "Magic shortbow".to_string(),
+                "Magic longbow (u)".to_string(),
+                "Magic longbow".to_string(),
+                "Magic shield".to_string(),
+                "Magic stock".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn switching_to_redwood_drops_a_bow() {
+        let options = vale_decor_options("Redwood");
+        assert_eq!(vale_remap_decor("Longbow (u)", "Redwood", &options), "Fletch decor from logs");
+        assert_eq!(vale_remap_decor("Magic longbow (u)", "Redwood", &options), "Fletch decor from logs");
+        assert_eq!(vale_remap_decor("Shield", "Redwood", &options), "Redwood shield");
+        assert_eq!(vale_remap_decor("Hiking staff", "Redwood", &options), "Redwood hiking staff");
+    }
+
+    #[test]
+    fn switching_logs_keeps_the_same_decoration() {
+        let options = vale_decor_options("Oak");
+        assert_eq!(vale_remap_decor("Magic longbow (u)", "Oak", &options), "Oak longbow (u)");
+        assert_eq!(vale_remap_decor("Longbow (u)", "Oak", &options), "Oak longbow (u)");
+        assert_eq!(vale_remap_decor("Redwood hiking staff", "Oak", &options), "Fletch decor from logs");
+    }
+}
 

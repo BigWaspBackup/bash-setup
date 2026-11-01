@@ -18,6 +18,8 @@ use crate::{
 pub enum Page {
     Course,
     Script,
+    Boat,
+    Items,
     Gear,
     Accounts,
     Antiban,
@@ -577,10 +579,34 @@ pub fn show(ctx: &egui::Context, paths: &SimbaPaths, editor: &mut Editor) -> Edi
                             }
                         }
                         Page::Script => {
-                            if let Some(script) = editor.run_script.clone() {
+                            let request = if let Some(script) = editor.run_script.clone() {
                                 if let Some(values) = editor.script.as_mut() {
                                     crate::scriptsetup::show(ui, &script.name, values);
+                                    crate::salvage::take_page(values)
+                                } else {
+                                    None
                                 }
+                            } else {
+                                None
+                            };
+                            if request.as_deref() == Some("Boat") {
+                                editor.page = Page::Boat;
+                            }
+                        }
+                        Page::Boat => {
+                            let request = if let Some(values) = editor.script.as_mut() {
+                                crate::salvage::show_boat(ui, values);
+                                crate::salvage::take_page(values)
+                            } else {
+                                None
+                            };
+                            if request.as_deref() == Some("Items") {
+                                editor.page = Page::Items;
+                            }
+                        }
+                        Page::Items => {
+                            if let Some(values) = editor.script.as_mut() {
+                                crate::salvage::show_items(ui, values);
                             }
                         }
                         Page::Gear => {
@@ -663,10 +689,23 @@ pub fn show(ctx: &egui::Context, paths: &SimbaPaths, editor: &mut Editor) -> Edi
 
 fn page_tabs(ui: &mut egui::Ui, editor: &mut Editor) {
     let mut pages = Vec::new();
+    let salvage = editor.run_script.as_ref().is_some_and(|script| crate::salvage::is_script(&script.name));
     if editor.course.is_some() {
         pages.push((Page::Course, "Course"));
     } else if editor.script.is_some() {
         pages.push((Page::Script, "Script"));
+        if salvage {
+            pages.push((Page::Boat, "Boat"));
+            let station = editor.script.as_ref().is_some_and(crate::salvage::station_enabled);
+            if station {
+                pages.push((Page::Items, "Items"));
+            } else if editor.page == Page::Items {
+                editor.page = Page::Boat;
+            }
+        }
+    }
+    if matches!(editor.page, Page::Boat | Page::Items) && !salvage {
+        editor.page = if editor.script.is_some() { Page::Script } else { Page::Accounts };
     }
     if editor.gear.is_some() {
         pages.push((Page::Gear, "Gear"));
