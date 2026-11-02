@@ -119,6 +119,21 @@ pub fn validate(script: &str, values: &HashMap<String, String>) -> Result<(), St
                 return Err("Choose an ore.".into());
             }
         }
+        Kind::Bank => {
+            let mode = text(values, "Mode");
+            match mode.as_str() {
+                "2" if text(values, "PrimaryItem").trim().is_empty() || text(values, "SecondaryItem").trim().is_empty() => {
+                    return Err("Enter the primary and secondary items.".into());
+                }
+                "3" | "4" if text(values, "ToolItem").trim().is_empty() || text(values, "MaterialItem").trim().is_empty() => {
+                    return Err("Enter the tool and the material.".into());
+                }
+                "6" if values.get("AlchTab").and_then(|value| value.parse::<i32>().ok()).unwrap_or(0) < 1 => {
+                    return Err("Choose Inventory or a bank tab for high alching.".into());
+                }
+                _ => {}
+            }
+        }
         _ => {}
     }
     Ok(())
@@ -679,15 +694,69 @@ fn smelt_page(ui: &mut Ui, values: &mut HashMap<String, String>) {
     }
 }
 
+fn line_edit(ui: &mut Ui, label: &str, tip: &str, values: &mut HashMap<String, String>, key: &str) {
+    let mut value = text(values, key);
+    field_label(ui, label, tip, false);
+    ui.text_edit_singleline(&mut value);
+    values.insert(key.to_string(), value);
+}
+
+fn locked_choice(ui: &mut Ui, salt: &str, label: &str, tip: &str, shown: &str) {
+    field_label(ui, label, tip, true);
+    ui.add_enabled_ui(false, |ui| {
+        ComboBox::from_id_salt(salt).width(360.0).selected_text(shown).show_ui(ui, |_| {});
+    });
+}
+
+const BANK_LOCATIONS: &[&str] = &[
+    "Al Kharid", "Ardougne", "Castle Wars", "Catherby", "Crafting Guild", "Draynor Village", "Edgeville", "Falador",
+    "Grand Exchange", "Lunar Isle", "Mining Guild", "Prifddinas", "Seers Village", "Varrock", "Wintertodt", "Fossil Island",
+    "Deepfin Point", "Blast Furnace", "Burgh De Rott", "Canifis", "Ferox Enclave", "Hosidius", "Lumbridge", "Mor Ul Rek",
+    "Motherloade Mine", "Mount Karuulm", "Myths Guild", "Nardah", "Neitiznot", "Piscarilius", "Port Phasmatys", "Rogues Den",
+    "Ruins Of Unkah", "Shilo Village", "The Onyx Crest", "The Summer Shore", "Warriors Guild", "Yanille", "Zanaris", "Wyrmscraig",
+    "Cooks Guild", "Port Khazard",
+];
+
+/// Farm and birdhouse tabs stay hidden for high alch and for banks that cannot return.
+pub fn bank_side_runs_allowed(values: &HashMap<String, String>) -> bool {
+    if values.get("Mode").is_some_and(|mode| mode == "6") {
+        return false;
+    }
+    let index = values.get("Bank").and_then(|value| value.parse::<usize>().ok()).unwrap_or(8);
+    let name = BANK_LOCATIONS.get(index).copied().unwrap_or("");
+    !bank_returns(name).is_empty()
+}
+
+/// Return methods for banks that can pause for farm or birdhouse runs.
+/// Same list as the script's GetReturnMethods. Other banks have none.
+fn bank_returns(bank: &str) -> &'static [&'static str] {
+    match bank {
+        "Ardougne" | "Catherby" | "Falador" | "Varrock" => &["Tablet", "Spell"],
+        "Castle Wars" => &["Ring of Dueling", "Minigame Teleport"],
+        "Crafting Guild" => &["Crafting Cape"],
+        "Deepfin Point" => &["Sailors' Amulet"],
+        "Grand Exchange" => &["Ring of Wealth", "Grand Exchange Teleport", "Varrock Teleport"],
+        "Wintertodt" => &["Games Necklace"],
+        _ => &[],
+    }
+}
+
+fn bank_mode_hint(mode: &str) -> &'static str {
+    match mode {
+        "1" => "Identifies grimy herbs and opens bird nests found in the main bank tab.",
+        "2" => "Uses the primary item on the secondary item. Names must match the game exactly.",
+        "3" => "Uses the tool on the material. Leave Make text blank when there is no choice.",
+        "4" => "Same as Processing, but the tool can be a stack that stays across trips.",
+        "5" => "Casts the chosen enchant spell on matching jewellery in the main bank tab.",
+        "6" => "High alch the inventory, or a bank tab. Farm and birdhouse runs stay off.",
+        _ => "Cuts uncut gems from the main bank tab, one type per inventory.",
+    }
+}
+
 fn bank_page(ui: &mut Ui, values: &mut HashMap<String, String>) {
-    const BANKS: &[&str] = &[
-        "Al Kharid", "Ardougne", "Castle Wars", "Catherby", "Crafting Guild", "Draynor Village", "Edgeville", "Falador",
-        "Grand Exchange", "Lunar Isle", "Mining Guild", "Prifddinas", "Seers Village", "Varrock", "Wintertodt", "Fossil Island",
-        "Deepfin Point", "Blast Furnace", "Burgh De Rott", "Canifis", "Ferox Enclave", "Hosidius", "Lumbridge", "Mor Ul Rek",
-        "Motherloade Mine", "Mount Karuulm", "Myths Guild", "Nardah", "Neitiznot", "Piscarilius", "Port Phasmatys", "Rogues Den",
-        "Ruins Of Unkah", "Shilo Village", "The Onyx Crest", "The Summer Shore", "Warriors Guild", "Yanille", "Zanaris", "Wyrmscraig",
-        "Cooks Guild", "Port Khazard",
-    ];
+    if values.get("Bank").and_then(|value| value.parse::<usize>().ok()).is_none() {
+        values.insert("Bank".into(), "8".into());
+    }
     choose_index_tip(
         ui,
         "bank-mode",
@@ -698,60 +767,87 @@ fn bank_page(ui: &mut Ui, values: &mut HashMap<String, String>) {
         &["Cutting gems", "Cleaning", "Combining", "Processing", "Processing stacks", "Enchanting", "High alching"],
         0,
     );
-    choose_index_tip(ui, "bank-where", "Bank", "Bank to stand at while processing.", values, "Bank", BANKS, 8);
     let mode = text(values, "Mode");
-    if mode == "5" {
-        choose_index(
+    let alch_tab = values.get("AlchTab").and_then(|value| value.parse::<usize>().ok()).unwrap_or(0);
+    let inventory_alch = mode == "6" && alch_tab == 1;
+    if inventory_alch {
+        locked_choice(
             ui,
-            "bank-spell",
-            "Spell",
-            values,
-            "Spell",
-            &["Opal & Sapphire", "Jade & Emerald", "Ruby & Red topaz", "Diamond", "Dragonstone"],
-            0,
-        );
-        checkbox_tip(
-            ui,
-            "Fast enchanting",
-            "Cast enchant spells as quickly as possible. Turn off if the client struggles to keep up.",
-            values,
-            "FastEnchanting",
-            false,
-        );
-    }
-    if mode == "6" {
-        choose_index(
-            ui,
-            "bank-alch",
-            "Alch from",
-            values,
-            "AlchTab",
-            &["Select", "Inventory", "Tab 1", "Tab 2", "Tab 3", "Tab 4", "Tab 5", "Tab 6", "Tab 7", "Tab 8", "Tab 9"],
-            1,
+            "bank-where-anywhere",
+            "Bank",
+            "Inventory high alch runs wherever you already are.",
+            "Anywhere",
         );
     } else {
-        let mut primary = text(values, "PrimaryItem");
-        let mut secondary = text(values, "SecondaryItem");
-        let mut tool = text(values, "ToolItem");
-        let mut material = text(values, "MaterialItem");
-        let mut make = text(values, "MakeText");
-        ui.label("Primary item");
-        ui.text_edit_singleline(&mut primary);
-        ui.label("Secondary item");
-        ui.text_edit_singleline(&mut secondary);
-        ui.label("Tool");
-        ui.text_edit_singleline(&mut tool);
-        ui.label("Material");
-        ui.text_edit_singleline(&mut material);
-        ui.label("Make text");
-        ui.text_edit_singleline(&mut make);
-        values.insert("PrimaryItem".into(), primary);
-        values.insert("SecondaryItem".into(), secondary);
-        values.insert("ToolItem".into(), tool);
-        values.insert("MaterialItem".into(), material);
-        values.insert("MakeText".into(), make);
+        choose_index_tip(ui, "bank-where", "Bank", "Bank to stand at while processing.", values, "Bank", BANK_LOCATIONS, 8);
     }
-    side_runs(ui, values, "EnableBirdhouse", &["Amulet of Glory", "Ring of Dueling", "Skills Necklace"]);
+    let bank_index = values.get("Bank").and_then(|value| value.parse::<usize>().ok()).unwrap_or(8);
+    let bank_name = BANK_LOCATIONS.get(bank_index).copied().unwrap_or("");
+
+    match mode.as_str() {
+        "2" => {
+            line_edit(ui, "Primary item", "Exact primary item name. Example: Vial of water or Air orb.", values, "PrimaryItem");
+            line_edit(
+                ui,
+                "Secondary item",
+                "Exact secondary item name. Example: Guam leaf or Battlestaff.",
+                values,
+                "SecondaryItem",
+            );
+        }
+        "3" | "4" => {
+            line_edit(ui, "Tool", "Tool used on the material. Example: Chisel, Needle, or Sacred oil.", values, "ToolItem");
+            line_edit(ui, "Material", "Material the tool is used on. Example: Soft clay or Magic logs.", values, "MaterialItem");
+            line_edit(ui, "Make text", "Make-interface option. Leave blank when there is no choice.", values, "MakeText");
+        }
+        "5" => {
+            choose_index(
+                ui,
+                "bank-spell",
+                "Spell",
+                values,
+                "Spell",
+                &["Opal & Sapphire", "Jade & Emerald", "Ruby & Red topaz", "Diamond", "Dragonstone"],
+                0,
+            );
+            checkbox_tip(
+                ui,
+                "Fast enchanting",
+                "Cast enchant spells as quickly as possible. Turn off if the client struggles to keep up.",
+                values,
+                "FastEnchanting",
+                true,
+            );
+        }
+        "6" => {
+            choose_index(
+                ui,
+                "bank-alch",
+                "Alch from",
+                values,
+                "AlchTab",
+                &["Select", "Inventory", "Tab 1", "Tab 2", "Tab 3", "Tab 4", "Tab 5", "Tab 6", "Tab 7", "Tab 8", "Tab 9"],
+                0,
+            );
+            if text(values, "AlchTab") == "0" {
+                ui.label(RichText::new("Choose Inventory or a bank tab before starting.").weak());
+            }
+        }
+        _ => {}
+    }
+    ui.add_space(6.0);
+    ui.label(RichText::new(bank_mode_hint(&mode)).weak());
+
+    if mode == "6" {
+        return;
+    }
+    let returns = bank_returns(bank_name);
+    if returns.is_empty() {
+        values.insert("EnableFarmRuns".into(), "false".into());
+        values.insert("EnableBirdhouse".into(), "false".into());
+        return;
+    }
+    side_runs(ui, values, "EnableBirdhouse", returns);
 }
 
 fn lunar_page(ui: &mut Ui, values: &mut HashMap<String, String>) {
@@ -1308,6 +1404,20 @@ static SPECS: &[Spec] = &[
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bank_side_runs_follow_the_script() {
+        let mut values = HashMap::new();
+        values.insert("Mode".into(), "2".into());
+        values.insert("Bank".into(), "8".into());
+        assert!(bank_side_runs_allowed(&values));
+        assert_eq!(bank_returns("Grand Exchange"), &["Ring of Wealth", "Grand Exchange Teleport", "Varrock Teleport"]);
+        values.insert("Bank".into(), "5".into());
+        assert!(!bank_side_runs_allowed(&values));
+        values.insert("Bank".into(), "8".into());
+        values.insert("Mode".into(), "6".into());
+        assert!(!bank_side_runs_allowed(&values));
+    }
 
     #[test]
     fn redwood_decorations_are_only_shield_and_hiking_staff() {

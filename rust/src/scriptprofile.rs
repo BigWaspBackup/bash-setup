@@ -439,6 +439,9 @@ impl Editor {
             return (catalog_farm && course.farm, catalog_bird && course.birdhouse);
         }
         if let Some(values) = &self.script {
+            if script.name.eq_ignore_ascii_case("AIO Bankstander") && !crate::scriptsetup::bank_side_runs_allowed(values) {
+                return (false, false);
+            }
             let (farm, bird) = crate::scriptsetup::side_runs_enabled(values);
             return (catalog_farm && farm, catalog_bird && bird);
         }
