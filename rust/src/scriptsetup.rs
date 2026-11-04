@@ -279,6 +279,39 @@ fn choose_index(ui: &mut Ui, salt: &str, label: &str, values: &mut HashMap<Strin
     choose_index_tip(ui, salt, label, "", values, key, options, default);
 }
 
+/// Shows `options` A to Z. The saved value stays the original index, so existing profiles keep the same furnace.
+fn choose_sorted_index_tip(
+    ui: &mut Ui,
+    salt: &str,
+    label: &str,
+    tip: &str,
+    values: &mut HashMap<String, String>,
+    key: &str,
+    options: &[&str],
+    default: usize,
+) {
+    if options.is_empty() {
+        return;
+    }
+    let mut index = values.get(key).and_then(|value| value.parse().ok()).unwrap_or(default);
+    if index >= options.len() {
+        index = default.min(options.len() - 1);
+    }
+    let mut order: Vec<usize> = (0..options.len()).collect();
+    order.sort_by(|&left, &right| options[left].to_ascii_lowercase().cmp(&options[right].to_ascii_lowercase()));
+    field_label(ui, label, tip, true);
+    let shown = options[index].to_string();
+    ComboBox::from_id_salt(salt)
+        .width(360.0)
+        .selected_text(shown)
+        .show_ui(ui, |ui| {
+            for item in order {
+                ui.selectable_value(&mut index, item, options[item]);
+            }
+        });
+    values.insert(key.to_string(), index.to_string());
+}
+
 fn choose_index_tip(
     ui: &mut Ui,
     salt: &str,
@@ -747,38 +780,62 @@ fn parse_items(csv: &str) -> HashMap<String, (String, String)> {
     out
 }
 
+const SMELT_FURNACES: &[&str] = &[
+    "Grimstone Dungeon",
+    "Shilo Village",
+    "Prifddinas",
+    "Edgeville",
+    "Deepfin Point",
+    "The Onyx Crest",
+    "Neitiznot",
+    "Mount Karuulm",
+    "The Summer Shore",
+    "Port Phasmatys",
+    "Mor Ul Rek Inner",
+    "Mor Ul Rek Outer",
+    "Burgh de Rott",
+    "Falador",
+    "Zanaris",
+    "East Ardougne",
+];
+const SMELT_METALS: &[&str] = &["Silver", "Gold"];
+
+fn smelt_returns(furnace: &str) -> &'static [&'static str] {
+    match furnace {
+        "Edgeville" => &["Amulet of Glory"],
+        "Deepfin Point" => &["Sailors' Amulet"],
+        "Falador" => &["Tablet", "Spell"],
+        _ => &[],
+    }
+}
+
 fn smelt_page(ui: &mut Ui, values: &mut HashMap<String, String>) {
-    const FURNACES: &[&str] = &[
-        "Grimstone Dungeon",
-        "Shilo Village",
-        "Prifddinas",
-        "Edgeville",
-        "Deepfin Point",
-        "The Onyx Crest",
-        "Neitiznot",
-        "Mount Karuulm",
-        "The Summer Shore",
-        "Port Phasmatys",
-        "Mor Ul Rek Inner",
-        "Mor Ul Rek Outer",
-        "Burgh de Rott",
-        "Falador",
-        "Zanaris",
-        "East Ardougne",
-    ];
-    choose_index_tip(ui, "smelt-furnace", "Furnace", "Which furnace to use.", values, "Furnace", FURNACES, 3);
-    choose_index_tip(
-        ui,
-        "smelt-mode",
-        "Activity",
-        "Cannonballs smelts cannonballs. Bars / Glass smelts bars or molten glass. Jewelry makes jewellery at the furnace.",
-        values,
-        "SmeltMode",
-        &["Cannonballs", "Bars / Glass", "Jewelry"],
-        0,
-    );
+    choose_sorted_index_tip(ui, "smelt-furnace", "Furnace", "Which furnace to use.", values, "Furnace", SMELT_FURNACES, 3);
+    let furnace = values.get("Furnace").and_then(|value| value.parse::<usize>().ok()).unwrap_or(3);
+    let name = SMELT_FURNACES.get(furnace).copied().unwrap_or("");
+    if name == "Grimstone Dungeon" {
+        values.insert("SmeltMode".into(), "0".into());
+        locked_choice(
+            ui,
+            "smelt-mode",
+            "Activity",
+            "Grimstone Dungeon only smelts cannonballs.",
+            "Cannonballs",
+        );
+    } else {
+        choose_index_tip(
+            ui,
+            "smelt-mode",
+            "Activity",
+            "Cannonballs smelts cannonballs. Bars / Glass smelts bars or molten glass. Jewelry makes jewellery at the furnace.",
+            values,
+            "SmeltMode",
+            &["Cannonballs", "Bars / Glass", "Jewelry"],
+            0,
+        );
+    }
     match text(values, "SmeltMode").as_str() {
-        "1" => choose_index(
+        "1" if name != "Grimstone Dungeon" => choose_index(
             ui,
             "smelt-bar",
             "Bar",
@@ -787,7 +844,7 @@ fn smelt_page(ui: &mut Ui, values: &mut HashMap<String, String>) {
             &["Bronze", "Iron", "Silver", "Steel", "Gold", "Mithril", "Adamantite", "Runite", "Molten glass"],
             4,
         ),
-        "2" => {
+        "2" if name != "Grimstone Dungeon" => {
             choose_index(
                 ui,
                 "smelt-jewel",
@@ -797,16 +854,28 @@ fn smelt_page(ui: &mut Ui, values: &mut HashMap<String, String>) {
                 &["Tiara", "Holy symbol", "Unholy symbol", "Bolts", "Ring", "Necklace", "Bracelet", "Amulet"],
                 4,
             );
-            choose_index(
-                ui,
-                "smelt-gem",
-                "Gem",
-                values,
-                "GemType",
-                &["None", "Opal", "Jade", "Red topaz", "Sapphire", "Emerald", "Ruby", "Diamond", "Dragonstone", "Onyx", "Zenyte"],
-                5,
-            );
-            choose_index(ui, "smelt-metal", "Metal", values, "MetalType", &["Silver", "Gold"], 1);
+            let jewel = values.get("JewelType").and_then(|value| value.parse::<usize>().ok()).unwrap_or(4);
+            if jewel < 4 {
+                values.insert("GemType".into(), "0".into());
+            } else {
+                choose_index(
+                    ui,
+                    "smelt-gem",
+                    "Gem",
+                    values,
+                    "GemType",
+                    &["None", "Opal", "Jade", "Red topaz", "Sapphire", "Emerald", "Ruby", "Diamond", "Dragonstone", "Onyx", "Zenyte"],
+                    5,
+                );
+            }
+            let gem = values.get("GemType").and_then(|value| value.parse::<usize>().ok()).unwrap_or(0);
+            if jewel == 0 {
+                choose_index(ui, "smelt-metal", "Metal", values, "MetalType", SMELT_METALS, 1);
+            } else {
+                let metal = if (1..=3).contains(&gem) || jewel < 4 { 0 } else { 1 };
+                values.insert("MetalType".into(), metal.to_string());
+                locked_choice(ui, "smelt-metal", "Metal", "Set from the jewellery and gem, same as the script form.", SMELT_METALS[metal]);
+            }
         }
         _ => choose_index(
             ui,
@@ -818,16 +887,19 @@ fn smelt_page(ui: &mut Ui, values: &mut HashMap<String, String>) {
             2,
         ),
     }
-    let furnace = values.get("Furnace").and_then(|value| value.parse::<usize>().ok()).unwrap_or(3);
-    let name = FURNACES.get(furnace).copied().unwrap_or("");
-    let returns: &[&str] = match name {
-        "Edgeville" => &["Amulet of Glory"],
-        "Deepfin Point" => &["Sailors' Amulet"],
-        "Falador" => &["Tablet", "Spell"],
-        _ => &[],
-    };
+    let returns = smelt_returns(name);
     if !returns.is_empty() {
         side_runs(ui, values, "EnableBirdhouse", returns);
+        let mut method = text(values, "ReturnMethod");
+        if method.is_empty() {
+            method = text(values, "BankReturnMethod");
+        }
+        method = snap_choice(&method, returns);
+        store_return(values, &method);
+    } else {
+        set_flag(values, "EnableFarmRuns", false);
+        set_flag(values, "EnableBirdhouse", false);
+        store_return(values, "");
     }
 }
 
@@ -1542,6 +1614,21 @@ static SPECS: &[Spec] = &[
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn smelter_follows_the_script_form() {
+        assert_eq!(SMELT_FURNACES[3], "Edgeville");
+        assert_eq!(smelt_returns("Grimstone Dungeon"), &[] as &[&str]);
+        assert_eq!(smelt_returns("Edgeville"), &["Amulet of Glory"]);
+        assert_eq!(smelt_returns("Deepfin Point"), &["Sailors' Amulet"]);
+        assert_eq!(smelt_returns("Falador"), &["Tablet", "Spell"]);
+        assert!(smelt_returns("Shilo Village").is_empty());
+        let mut names: Vec<&str> = SMELT_FURNACES.to_vec();
+        names.sort_by(|left, right| left.to_ascii_lowercase().cmp(&right.to_ascii_lowercase()));
+        assert_eq!(names.first().copied(), Some("Burgh de Rott"));
+        assert_eq!(names[names.len() - 1], "Zanaris");
+        assert_ne!(names[0], SMELT_FURNACES[0]);
+    }
 
     #[test]
     fn wood_options_follow_the_location_and_tree() {
