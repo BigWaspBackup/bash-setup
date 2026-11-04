@@ -2138,12 +2138,6 @@ impl Launcher {
 
     fn profile_window(&mut self, ctx: &egui::Context) {
         let paths = self.paths.clone();
-        if let Some(client) = self.logged_in_client() {
-            let name = client.account();
-            if let Some(editor) = self.profile_editor.as_mut() {
-                editor.note_logged_in(&paths, &name);
-            }
-        }
         let event = {
             let Some(editor) = self.profile_editor.as_mut() else {
                 return;

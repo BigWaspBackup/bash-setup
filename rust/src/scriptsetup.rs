@@ -14,6 +14,10 @@ pub fn supports(name: &str) -> bool {
     spec_for(name).is_some()
 }
 
+fn stored<'a>(key: &'a str, values: &'a HashMap<String, String>) -> Option<(&'a str, String)> {
+    values.get(key).map(|value| (key, value.clone()))
+}
+
 pub fn load(configs: &Path, script: &str, account: &str) -> HashMap<String, String> {
     let Some(spec) = spec_for(script) else {
         return HashMap::new();
@@ -24,10 +28,19 @@ pub fn load(configs: &Path, script: &str, account: &str) -> HashMap<String, Stri
             let text = std::fs::read_to_string(configs.join(file)).unwrap_or_default();
             let account_section = format!("{account}{}", spec.suffix);
             for row in spec.rows {
-                let section_name = if spec.suffix.is_empty() { row.section } else { account_section.as_str() };
-                let section = ini_section(&text, section_name);
+                let section_name = if spec.suffix.is_empty() {
+                    format!("{account} {}", row.section)
+                } else {
+                    account_section.clone()
+                };
+                let section = ini_section(&text, &section_name);
                 if let Some(value) = ini_get(&section, row.key) {
                     values.insert(row.key.to_string(), value);
+                } else if spec.suffix.is_empty() {
+                    let shared = ini_section(&text, row.section);
+                    if let Some(value) = ini_get(&shared, row.key) {
+                        values.insert(row.key.to_string(), value);
+                    }
                 }
             }
         }
@@ -72,33 +85,25 @@ pub fn save(configs: &Path, script: &str, account: &str, values: &HashMap<String
                     .rows
                     .iter()
                     .filter(|row| row.section == section)
-                    .map(|row| (row.key, values.get(row.key).cloned().unwrap_or_default()))
+                    .filter_map(|row| stored(row.key, values))
                     .collect();
-                next = write_section(&next, section, &pairs);
+                if pairs.is_empty() {
+                    continue;
+                }
+                next = write_section(&next, &format!("{account} {section}"), &pairs);
             }
         } else {
-            let pairs: Vec<(&str, String)> = spec
-                .rows
-                .iter()
-                .map(|row| (row.key, values.get(row.key).cloned().unwrap_or_default()))
-                .collect();
+            let pairs: Vec<(&str, String)> = spec.rows.iter().filter_map(|row| stored(row.key, values)).collect();
             next = write_section(&next, &format!("{account}{}", spec.suffix), &pairs);
         }
         return std::fs::write(path, next).map_err(|error| format!("Could not save the script settings: {error}"));
     }
     let path = configs.join("BASettings.ini");
     let existing = std::fs::read_to_string(&path).unwrap_or_default();
-    let pairs: Vec<(&str, String)> = spec
-        .keys
-        .iter()
-        .map(|key| (*key, values.get(*key).cloned().unwrap_or_default()))
-        .collect();
+    let pairs: Vec<(&str, String)> = spec.keys.iter().filter_map(|key| stored(key, values)).collect();
     let mut next = write_section(&existing, &format!("{account}{}", spec.suffix), &pairs);
     if spec.kind == Kind::Salvage {
-        let boat_pairs: Vec<(&str, String)> = crate::salvage::BOAT_KEYS
-            .iter()
-            .map(|key| (*key, values.get(*key).cloned().unwrap_or_default()))
-            .collect();
+        let boat_pairs: Vec<(&str, String)> = crate::salvage::BOAT_KEYS.iter().filter_map(|key| stored(key, values)).collect();
         next = write_section(&next, &format!("{account} Boat Setup"), &boat_pairs);
     }
     std::fs::write(path, next).map_err(|error| format!("Could not save the script settings: {error}"))
@@ -249,17 +254,23 @@ fn choose_tip(ui: &mut Ui, salt: &str, label: &str, tip: &str, current: &mut Str
     if options.is_empty() {
         return;
     }
-    if !options.iter().any(|option| *option == current.as_str()) {
+    if let Some(option) = options.iter().find(|option| option.eq_ignore_ascii_case(current)) {
+        *current = (*option).to_string();
+    } else if current.trim().is_empty() {
         *current = options[0].to_string();
     }
     field_label(ui, label, tip, true);
+    let mut choices: Vec<String> = options.iter().map(|option| (*option).to_string()).collect();
+    if !choices.iter().any(|option| option == current) {
+        choices.insert(0, current.clone());
+    }
     let shown = current.clone();
     ComboBox::from_id_salt(salt)
         .width(360.0)
         .selected_text(shown)
         .show_ui(ui, |ui| {
-            for option in options {
-                ui.selectable_value(current, (*option).to_string(), *option);
+            for option in &choices {
+                ui.selectable_value(current, option.clone(), option);
             }
         });
 }
@@ -435,7 +446,7 @@ fn wood_page(ui: &mut Ui, values: &mut HashMap<String, String>) {
     };
     let mut tree = text(values, "Tree");
     choose(ui, "wc-tree", "Tree", &mut tree, spot.methods);
-    values.insert("Tree".into(), tree);
+    values.insert("Tree".into(), tree.clone());
     let mut mode = text(values, "Mode");
     choose_tip(
         ui,
@@ -467,6 +478,23 @@ fn wood_page(ui: &mut Ui, values: &mut HashMap<String, String>) {
         "PreferForestryWorlds",
         false,
     );
+    ui.add_space(8.0);
+    ui.label(RichText::new("Forestry events").strong());
+    checkbox_tip(ui, "Rising Roots", "Chop anima-infused roots when the green tile uptext is fused.", values, "ForestryRisingRoots", true);
+    checkbox_tip(ui, "Beehive", "Build unfinished beehives from logs in the inventory.", values, "ForestryBeehive", true);
+    checkbox_tip(ui, "Enchantment Ritual", "Stand on the green ritual tile.", values, "ForestryRitual", true);
+    checkbox_tip(ui, "Woodcutting Leprechaun", "Stand on the rainbow and keep the luck buff.", values, "ForestryLeprechaun", true);
+    checkbox_tip(ui, "Poachers", "Disarm fox traps until they stop spawning.", values, "ForestryPoachers", true);
+    if location == "Isle of Souls" && tree == "Teak" {
+        checkbox_tip(
+            ui,
+            "Only the two close teaks",
+            "Isle of Souls teak: chop the two trees that stand next to each other.",
+            values,
+            "SoulsCloseTeaks",
+            false,
+        );
+    }
     if spot.side {
         side_runs(ui, values, "EnableBirdhouseRuns", spot.returns);
     }
@@ -1014,7 +1042,8 @@ const FISH_KEYS: &[&str] = &["Location", "Method", "Mode", "EnableFarmRuns", "En
 const MINE_KEYS: &[&str] = &["Ore", "Location", "Mode", "EnableFarmRuns", "EnableBirdhouseRuns", "BankReturnMethod"];
 const WOOD_KEYS: &[&str] = &[
     "Location", "Tree", "Mode", "FletchItem", "EnableFarmRuns", "EnableBirdhouseRuns", "BankReturnMethod", "StayNearPlayers",
-    "PreferForestryWorlds",
+    "PreferForestryWorlds", "ForestryRisingRoots", "ForestryBeehive", "ForestryRitual", "ForestryLeprechaun", "ForestryPoachers",
+    "SoulsCloseTeaks",
 ];
 const COOK_KEYS: &[&str] = &["Location", "Food", "CustomFood", "CookTab", "CookMode", "EnableFarmRuns", "EnableBirdhouse", "ReturnMethod"];
 const ANVIL_KEYS: &[&str] = &["Location", "Metal", "Item", "EnableFarmRuns", "EnableBirdhouse", "ReturnMethod"];

@@ -103,6 +103,8 @@ struct Farm {
     magic_secateurs: bool,
     lumby_elite: bool,
     run_now: bool,
+    enable_patches: bool,
+    enable_birdhouse: bool,
 }
 
 #[derive(Clone)]
@@ -134,8 +136,6 @@ pub struct Editor {
     show_pin: bool,
     show_webhook: bool,
     worlds_picker: crate::worlds::Picker,
-    /// RuneLite account already applied to the list, so a later login can replace it.
-    seen_login: String,
     pub error: String,
 }
 
@@ -315,12 +315,13 @@ impl Editor {
         let key = agility::account_key(&label);
         let mut editor = Self::load(paths, &key, &label);
         editor.run_script = Some(script.clone());
+        let saved_as = editor.account_key();
         if crate::agility::is_aio_agility(script) {
             editor.page = Page::Course;
-            editor.course = Some(CourseSettings::load_for(paths, &key));
+            editor.course = Some(CourseSettings::load_for(paths, &saved_as));
         } else if crate::scriptsetup::supports(&script.name) {
             editor.page = Page::Script;
-            editor.script = Some(crate::scriptsetup::load(&paths.configs(), &script.name, &key));
+            editor.script = Some(crate::scriptsetup::load(&paths.configs(), &script.name, &saved_as));
         }
         editor.client_hwnd = Some(client.hwnd);
         if script.name.eq_ignore_ascii_case("Tormented Demons") {
@@ -339,26 +340,25 @@ impl Editor {
     }
 
     fn load(paths: &SimbaPaths, account_key: &str, label: &str) -> Self {
-        let mut accounts = read_accounts(&paths.root.join("credentials.simba"));
-        let mut selected = accounts.iter().position(|account| account.name.eq_ignore_ascii_case(account_key));
-        if selected.is_none() && account_key != "NoUserNameSelected" {
-            accounts.push(Account {
-                name: account_key.to_string(),
-                pin: String::new(),
-                worlds: String::new(),
-            });
-            selected = Some(accounts.len() - 1);
-        }
-        let selected = selected.unwrap_or(0);
+        let accounts = read_accounts(&paths.root.join("credentials.simba"));
+        let selected = accounts
+            .iter()
+            .position(|account| account.name.eq_ignore_ascii_case(account_key))
+            .unwrap_or(0);
         let index = if accounts.is_empty() { 0 } else { selected };
-        let (antiban, antiban_hashed_for) = Antiban::load(&ini_text(&paths.configs().join("BASettings.ini")), account_key);
+        let settings_key = accounts
+            .get(selected)
+            .map(|account| account.name.trim().to_string())
+            .filter(|name| !name.is_empty())
+            .unwrap_or_else(|| account_key.to_string());
+        let (antiban, antiban_hashed_for) = Antiban::load(&ini_text(&paths.configs().join("BASettings.ini")), &settings_key);
         Self {
             page: Page::Accounts,
             run_script: None,
             account_label: label.to_string(),
             antiban,
             antiban_hashed_for,
-            webhook: Webhook::load(&ini_text(&paths.configs().join("BASettings.ini")), account_key),
+            webhook: Webhook::load(&ini_text(&paths.configs().join("BASettings.ini")), &settings_key),
             farm: Farm::load(&ini_text(&paths.configs().join("BASHFarmSettings")), index),
             bird: Birdhouse::load(&ini_text(&paths.configs().join("BASHBirdHouseSettings")), index),
             accounts,
@@ -370,45 +370,8 @@ impl Editor {
             show_pin: false,
             show_webhook: false,
             worlds_picker: crate::worlds::Picker::default(),
-            seen_login: if account_key == "NoUserNameSelected" {
-                String::new()
-            } else {
-                account_key.to_string()
-            },
             error: String::new(),
         }
-    }
-
-    /// Select or fill the account that is logged in on RuneLite, then load that account's settings.
-    pub fn note_logged_in(&mut self, paths: &SimbaPaths, label: &str) {
-        let key = agility::account_key(label);
-        if key == "NoUserNameSelected" || self.seen_login == key {
-            return;
-        }
-        self.seen_login = key.clone();
-        self.account_label = label.to_string();
-        if let Some(index) = self.accounts.iter().position(|account| account.name.eq_ignore_ascii_case(&key)) {
-            if index != self.selected {
-                self.reload_account(paths, index);
-            }
-            return;
-        }
-        if let Some(account) = self.accounts.get_mut(self.selected) {
-            let current = account.name.trim();
-            if current.is_empty() || current.eq_ignore_ascii_case("New account") {
-                account.name = key;
-                let index = self.selected;
-                self.reload_account(paths, index);
-                return;
-            }
-        }
-        self.accounts.push(Account {
-            name: key,
-            pin: String::new(),
-            worlds: String::new(),
-        });
-        let index = self.accounts.len() - 1;
-        self.reload_account(paths, index);
     }
 
     pub fn validate_course(&self) -> Result<(), String> {
@@ -421,6 +384,15 @@ impl Editor {
         if let Some(gear) = &self.gear {
             gear.validate()?;
         }
+        if self
+            .run_script
+            .as_ref()
+            .is_some_and(|script| script.name.eq_ignore_ascii_case("Standalone Farm and Birdhouse Runs"))
+            && !self.farm.enable_patches
+            && !self.farm.enable_birdhouse
+        {
+            return Err("Turn on farm runs, birdhouse runs, or both.".into());
+        }
         Ok(())
     }
 
@@ -431,7 +403,7 @@ impl Editor {
             return (true, true);
         };
         if script.name.eq_ignore_ascii_case("Standalone Farm and Birdhouse Runs") {
-            return (true, true);
+            return (self.farm.enable_patches, self.farm.enable_birdhouse);
         }
         let catalog_farm = script.features.iter().any(|feature| feature == "farm_runs");
         let catalog_bird = script.features.iter().any(|feature| feature == "birdhouses");
@@ -459,8 +431,8 @@ impl Editor {
     pub fn account_key(&self) -> String {
         self.accounts
             .get(self.selected)
-            .map(|account| account.name.clone())
-            .filter(|name| !name.trim().is_empty())
+            .map(|account| account.name.trim().to_string())
+            .filter(|name| !name.is_empty())
             .unwrap_or_else(|| "NoUserNameSelected".into())
     }
 
@@ -488,7 +460,12 @@ impl Editor {
         let Some(account) = self.accounts.get(index) else {
             return;
         };
-        let key = account.name.clone();
+        let trimmed = account.name.trim();
+        let key = if trimmed.is_empty() {
+            "NoUserNameSelected".to_string()
+        } else {
+            trimmed.to_string()
+        };
         let (antiban, hashed_for) = Antiban::load(&ini_text(&paths.configs().join("BASettings.ini")), &key);
         self.antiban = antiban;
         self.antiban_hashed_for = hashed_for;
@@ -539,6 +516,7 @@ pub fn show(ctx: &egui::Context, paths: &SimbaPaths, editor: &mut Editor) -> Edi
     }
     let mut event = EditorEvent::None;
     let mut switch_to: Option<usize> = None;
+    let mut reload_only: Option<usize> = None;
     let mut close_requested = false;
     let running = editor.run_script.is_some();
     let title = if running {
@@ -565,6 +543,7 @@ pub fn show(ctx: &egui::Context, paths: &SimbaPaths, editor: &mut Editor) -> Edi
         .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
         .show(ctx, |ui| {
             ui.set_min_size(egui::vec2(SETTINGS_WIDTH, SETTINGS_MIN_HEIGHT));
+            account_picker(ui, editor, &mut switch_to);
             page_tabs(ui, editor);
             ui.separator();
             ScrollArea::vertical()
@@ -582,7 +561,13 @@ pub fn show(ctx: &egui::Context, paths: &SimbaPaths, editor: &mut Editor) -> Edi
                             }
                         }
                         Page::Script => {
-                            let request = if let Some(script) = editor.run_script.clone() {
+                            let standalone = editor.run_script.as_ref().is_some_and(|script| {
+                                script.name.eq_ignore_ascii_case("Standalone Farm and Birdhouse Runs")
+                            });
+                            let request = if standalone {
+                                standalone_script_page(ui, &mut editor.farm);
+                                None
+                            } else if let Some(script) = editor.run_script.clone() {
                                 if let Some(values) = editor.script.as_mut() {
                                     crate::scriptsetup::show(ui, &script.name, values);
                                     crate::salvage::take_page(values)
@@ -619,7 +604,7 @@ pub fn show(ctx: &egui::Context, paths: &SimbaPaths, editor: &mut Editor) -> Edi
                                 gear.ui(ui, paths, hwnd, &account);
                             }
                         }
-                        Page::Accounts => accounts_page(ui, editor, &mut switch_to),
+                        Page::Accounts => accounts_page(ui, editor, &mut switch_to, &mut reload_only),
                         Page::Antiban => {
                             let label = editor.selected_name();
                             let hash_name = editor
@@ -677,6 +662,12 @@ pub fn show(ctx: &egui::Context, paths: &SimbaPaths, editor: &mut Editor) -> Edi
     if let Some(index) = switch_to {
         if let Err(error) = editor.save(paths) {
             editor.error = error;
+        } else {
+            editor.reload_account(paths, index);
+        }
+    } else if let Some(index) = reload_only {
+        if editor.accounts.is_empty() {
+            editor.selected = 0;
         } else {
             editor.reload_account(paths, index);
         }
@@ -757,7 +748,33 @@ fn confirm_close(editor: &mut Editor, paths: &SimbaPaths) -> EditorEvent {
     }
 }
 
-fn accounts_page(ui: &mut egui::Ui, editor: &mut Editor, switch_to: &mut Option<usize>) {
+fn account_picker(ui: &mut egui::Ui, editor: &Editor, switch_to: &mut Option<usize>) {
+    if editor.accounts.is_empty() {
+        ui.label("Add an account on the Accounts tab. Each account keeps its own settings.");
+        ui.add_space(6.0);
+        return;
+    }
+    let current = editor.selected_name();
+    ui.horizontal(|ui| {
+        ui.label(RichText::new("Account").strong());
+        ComboBox::from_id_salt("settings-account")
+            .width(280.0)
+            .selected_text(current)
+            .show_ui(ui, |ui| {
+                for index in 0..editor.accounts.len() {
+                    let name = editor.accounts[index].name.trim();
+                    let name = if name.is_empty() { "Unnamed" } else { name };
+                    if ui.selectable_label(index == editor.selected, name).clicked() && index != editor.selected {
+                        *switch_to = Some(index);
+                    }
+                }
+            });
+        crate::ui::help_tip(ui, "Settings are saved for this account and loaded when you change it.");
+    });
+    ui.add_space(6.0);
+}
+
+fn accounts_page(ui: &mut egui::Ui, editor: &mut Editor, switch_to: &mut Option<usize>, reload_only: &mut Option<usize>) {
     ui.label("Pick an account on the left. Name, bank pin, and worlds are shared by every script.");
     ui.add_space(8.0);
     ui.horizontal_top(|ui| {
@@ -793,7 +810,7 @@ fn accounts_page(ui: &mut egui::Ui, editor: &mut Editor, switch_to: &mut Option<
                     let name = editor.selected_name();
                     if crate::ui::ask_yes_no(&format!("Delete {name}?\n\nThe name, bank pin, and worlds are removed.")) {
                         editor.accounts.remove(editor.selected);
-                        editor.selected = editor.selected.min(editor.accounts.len().saturating_sub(1));
+                        *reload_only = Some(editor.selected.min(editor.accounts.len().saturating_sub(1)));
                     }
                 }
             });
@@ -1042,6 +1059,38 @@ const SETTINGS_WIDTH: f32 = 960.0;
 const SETTINGS_BODY: f32 = 500.0;
 /// Tabs, separators, the error line, and the buttons under the scrolling body.
 const SETTINGS_MIN_HEIGHT: f32 = SETTINGS_BODY + 120.0;
+
+fn standalone_script_page(ui: &mut egui::Ui, farm: &mut Farm) {
+    ui.label(RichText::new("Standalone Farm and Birdhouse Runs").strong());
+    ui.add_space(8.0);
+    tip_check(
+        ui,
+        &mut farm.enable_patches,
+        "Farm runs",
+        "Herb, flower, allotment, and bush runs. Turn this off to skip farming.",
+    );
+    tip_check(
+        ui,
+        &mut farm.enable_birdhouse,
+        "Birdhouse runs",
+        "Birdhouse runs on Fossil Island. Turn this off to skip birdhouses.",
+    );
+    ui.add_space(8.0);
+    tip_heading(ui, "Location", "Grand Exchange is the only starting location right now.");
+    ui.add_enabled_ui(false, |ui| {
+        ComboBox::from_id_salt("standalone-start-location")
+            .width(360.0)
+            .selected_text("Grand Exchange")
+            .show_ui(ui, |_| {});
+    });
+    ui.add_space(8.0);
+    if farm.enable_patches {
+        ui.label("Choose the patches on the Farm tab.");
+    }
+    if farm.enable_birdhouse {
+        ui.label("Choose the log and seed on the Birdhouse tab.");
+    }
+}
 
 fn farm_page(ui: &mut egui::Ui, farm: &mut Farm, account: &str) {
     farm.tree = 0;
@@ -1517,6 +1566,8 @@ impl Default for Farm {
             magic_secateurs: false,
             lumby_elite: false,
             run_now: false,
+            enable_patches: true,
+            enable_birdhouse: true,
         }
     }
 }
@@ -1548,6 +1599,8 @@ impl Farm {
         farm.magic_secateurs = agility::ini_bool(&body, "Magic secateurs", false);
         farm.lumby_elite = agility::ini_bool(&body, "Lumby elite", false);
         farm.run_now = agility::ini_bool(&body, "Run now", false);
+        farm.enable_patches = agility::ini_bool(&body, "Enable patches", true);
+        farm.enable_birdhouse = agility::ini_bool(&body, "Enable birdhouse", true);
         farm
     }
 
@@ -1557,22 +1610,22 @@ impl Farm {
             ("Flower seed".into(), self.flower.to_string()),
             ("Allotment seed".into(), self.allotment.to_string()),
             ("Bush seed".into(), self.bush.to_string()),
-            ("Cactus seed".into(), "0".into()),
-            ("Anima seed".into(), "0".into()),
-            ("Tree sapling".into(), "0".into()),
-            ("Fruit sapling".into(), "0".into()),
+            ("Cactus seed".into(), self.cactus.to_string()),
+            ("Anima seed".into(), self.anima.to_string()),
+            ("Tree sapling".into(), self.tree.to_string()),
+            ("Fruit sapling".into(), self.fruit.to_string()),
             ("Compost".into(), self.compost.to_string()),
             ("Barb dibber".into(), simba_bool(self.barb_dibber)),
             ("Magic secateurs".into(), simba_bool(self.magic_secateurs)),
             ("Lumby elite".into(), simba_bool(self.lumby_elite)),
             ("Run now".into(), simba_bool(self.run_now)),
-            ("Enable patches".into(), "True".into()),
+            ("Enable patches".into(), simba_bool(self.enable_patches)),
             ("Enable trees".into(), "False".into()),
-            ("Enable birdhouse".into(), "True".into()),
+            ("Enable birdhouse".into(), simba_bool(self.enable_birdhouse)),
             ("Starting location".into(), "0".into()),
         ];
         for (i, (_, key)) in PATCHES.iter().enumerate() {
-            let on = i < 31 && self.patches.get(i).copied().unwrap_or(false);
+            let on = self.patches.get(i).copied().unwrap_or(false);
             pairs.push(((*key).to_string(), simba_bool(on)));
         }
         let options = travels();

@@ -674,23 +674,79 @@ fn return_item(method: &str) -> Option<String> {
     Some(named.to_string())
 }
 
+fn header_name(line: &str) -> Option<&str> {
+    let trimmed = line.trim();
+    if trimmed.starts_with('[') && trimmed.ends_with(']') && trimmed.len() >= 2 {
+        Some(trimmed[1..trimmed.len() - 1].trim())
+    } else {
+        None
+    }
+}
+
+/// Section body. The header match ignores case, and a later empty copy of the
+/// same section does not wipe values already stored under another casing.
 pub(crate) fn ini_section(text: &str, section: &str) -> String {
-    let header = format!("[{section}]");
+    let exact_header = format!("[{section}]");
+    let mut blocks: Vec<(bool, String)> = Vec::new();
     let mut inside = false;
-    let mut out = String::new();
+    let mut exact = false;
+    let mut current = String::new();
     for line in text.lines() {
         let trimmed = line.trim();
-        if trimmed.starts_with('[') && trimmed.ends_with(']') {
+        if header_name(trimmed).is_some() {
             if inside {
-                break;
+                blocks.push((exact, std::mem::take(&mut current)));
+                inside = false;
             }
-            inside = trimmed == header;
+            if header_name(trimmed).is_some_and(|name| name.eq_ignore_ascii_case(section)) {
+                inside = true;
+                exact = trimmed == exact_header;
+            }
             continue;
         }
         if inside {
-            out.push_str(line);
-            out.push('\n');
+            current.push_str(line);
+            current.push('\n');
         }
+    }
+    if inside {
+        blocks.push((exact, current));
+    }
+    let mut merged: Vec<(String, String)> = Vec::new();
+    let mut order: Vec<String> = Vec::new();
+    let apply = |blocks: &[(bool, String)], want_exact: bool, merged: &mut Vec<(String, String)>, order: &mut Vec<String>| {
+        for (is_exact, body) in blocks {
+            if *is_exact != want_exact {
+                continue;
+            }
+            for line in body.lines() {
+                let Some((name, value)) = line.split_once('=') else {
+                    continue;
+                };
+                let key = name.trim();
+                if key.is_empty() {
+                    continue;
+                }
+                let value = value.trim();
+                if let Some(index) = order.iter().position(|existing| existing.eq_ignore_ascii_case(key)) {
+                    if !value.is_empty() {
+                        merged[index].1 = value.to_string();
+                    }
+                } else {
+                    order.push(key.to_ascii_lowercase());
+                    merged.push((key.to_string(), value.to_string()));
+                }
+            }
+        }
+    };
+    apply(&blocks, false, &mut merged, &mut order);
+    apply(&blocks, true, &mut merged, &mut order);
+    let mut out = String::new();
+    for (key, value) in merged {
+        out.push_str(&key);
+        out.push('=');
+        out.push_str(&value);
+        out.push('\n');
     }
     out
 }
@@ -722,32 +778,52 @@ pub(crate) fn write_section(existing: &str, section: &str, pairs: &[(&str, Strin
     if lines.last().is_some_and(|line| line.is_empty()) {
         lines.pop();
     }
-    let start = lines.iter().position(|line| line.trim() == header);
+    let mut ranges = Vec::new();
+    let mut index = 0;
+    while index < lines.len() {
+        if header_name(&lines[index]).is_some_and(|name| name.eq_ignore_ascii_case(section)) {
+            let start = index;
+            index += 1;
+            while index < lines.len() && header_name(&lines[index]).is_none() {
+                index += 1;
+            }
+            ranges.push((start, index));
+        } else {
+            index += 1;
+        }
+    }
     let mut body: Vec<String> = pairs.iter().map(|(key, value)| format!("{key}={value}")).collect();
-    if let Some(start) = start {
-        let end = lines
-            .iter()
-            .skip(start + 1)
-            .position(|line| {
-                let trimmed = line.trim();
-                trimmed.starts_with('[') && trimmed.ends_with(']')
-            })
-            .map(|offset| start + 1 + offset)
-            .unwrap_or(lines.len());
-        for line in &lines[start + 1..end] {
+    let mut seen: Vec<String> = pairs.iter().map(|(key, _)| key.to_ascii_lowercase()).collect();
+    for (start, end) in &ranges {
+        for line in &lines[start + 1..*end] {
             let Some((name, _)) = line.split_once('=') else {
                 continue;
             };
-            if pairs.iter().any(|(key, _)| name.trim().eq_ignore_ascii_case(key)) {
+            let key = name.trim();
+            if key.is_empty() || seen.iter().any(|item| item.eq_ignore_ascii_case(key)) {
                 continue;
             }
+            seen.push(key.to_ascii_lowercase());
             body.push(line.clone());
         }
+    }
+    if let Some((start, _)) = ranges.first().copied() {
+        let mut skip = vec![false; lines.len()];
+        for (range_start, range_end) in &ranges {
+            for line_index in *range_start..*range_end {
+                skip[line_index] = true;
+            }
+        }
         let mut next = Vec::new();
-        next.extend(lines[..start].iter().cloned());
-        next.push(header);
-        next.extend(body);
-        next.extend(lines[end..].iter().cloned());
+        for (line_index, line) in lines.iter().enumerate() {
+            if line_index == start {
+                next.push(header.clone());
+                next.extend(body.iter().cloned());
+            }
+            if !skip[line_index] {
+                next.push(line.clone());
+            }
+        }
         lines = next;
     } else {
         if !lines.is_empty() && !lines.last().is_some_and(|line| line.is_empty()) {
@@ -761,4 +837,28 @@ pub(crate) fn write_section(existing: &str, section: &str, pairs: &[(&str, Strin
         text.push_str(newline);
     }
     text
+}
+
+#[cfg(test)]
+mod ini_tests {
+    use super::{ini_get, ini_section, write_section};
+
+    #[test]
+    fn section_lookup_ignores_the_account_casing() {
+        let text = "[bigaUS5IE AIO Woodcutting Settings]\r\nLocation=Seers' Village\r\nTree=Yew\r\n";
+        let body = ini_section(text, "BIGAUS5IE AIO Woodcutting Settings");
+        assert_eq!(ini_get(&body, "Location").as_deref(), Some("Seers' Village"));
+        assert_eq!(ini_get(&body, "Tree").as_deref(), Some("Yew"));
+    }
+
+    #[test]
+    fn writing_a_section_replaces_a_different_casing_instead_of_duplicating_it() {
+        let existing = "[bigaUS5IE BA AIO Bankstander Settings]\r\nMode=2\r\nPrimaryItem=Vial of water\r\nSpell=1\r\n";
+        let next = write_section(existing, "BIGAUS5IE BA AIO Bankstander Settings", &[("Mode", "5".into())]);
+        assert_eq!(next.matches('[').count(), 1);
+        let body = ini_section(&next, "BIGAUS5IE BA AIO Bankstander Settings");
+        assert_eq!(ini_get(&body, "Mode").as_deref(), Some("5"));
+        assert_eq!(ini_get(&body, "PrimaryItem").as_deref(), Some("Vial of water"));
+        assert_eq!(ini_get(&body, "Spell").as_deref(), Some("1"));
+    }
 }
