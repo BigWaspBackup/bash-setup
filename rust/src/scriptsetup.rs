@@ -342,7 +342,16 @@ fn side_runs(ui: &mut Ui, values: &mut HashMap<String, String>, bird_key: &str, 
         if method.is_empty() {
             method = text(values, "BankReturnMethod");
         }
-        choose_tip(ui, "script-return", "Return method", TIP_RETURN, &mut method, returns);
+        if let Some(option) = returns.iter().find(|option| option.eq_ignore_ascii_case(&method)) {
+            method = (*option).to_string();
+        } else {
+            method = returns[0].to_string();
+        }
+        if returns.len() == 1 {
+            locked_choice(ui, "script-return", "Return method", TIP_RETURN, &method);
+        } else {
+            choose_tip(ui, "script-return", "Return method", TIP_RETURN, &mut method, returns);
+        }
         values.insert("ReturnMethod".into(), method.clone());
         values.insert("BankReturnMethod".into(), method.clone());
         values.insert("FarmReturnMethod".into(), method.clone());
@@ -436,55 +445,143 @@ fn mine_page(ui: &mut Ui, values: &mut HashMap<String, String>) {
     }
 }
 
+fn snap_choice(current: &str, options: &[&str]) -> String {
+    options
+        .iter()
+        .find(|option| option.eq_ignore_ascii_case(current))
+        .map(|option| (*option).to_string())
+        .or_else(|| options.first().map(|option| (*option).to_string()))
+        .unwrap_or_default()
+}
+
+fn set_flag(values: &mut HashMap<String, String>, key: &str, on: bool) {
+    values.insert(key.to_string(), if on { "true" } else { "false" }.to_string());
+}
+
+fn store_return(values: &mut HashMap<String, String>, method: &str) {
+    for key in ["ReturnMethod", "BankReturnMethod", "FarmReturnMethod", "BirdhouseReturnMethod"] {
+        values.insert(key.to_string(), method.to_string());
+    }
+}
+
+/// Fletch list for one tree. Matches AIO Woodcutting AddTreeType, not the location's combined list.
+fn wood_fletch(tree: &str) -> &'static [&'static str] {
+    match tree {
+        "Regular" => &["Arrow shaft", "Shortbow", "Longbow", "Wooden stock"],
+        "Oak" => &["Arrow shaft", "Oak shortbow", "Oak longbow", "Oak stock", "Oak shield"],
+        "Willow" => &["Arrow shaft", "Willow shortbow", "Willow longbow", "Willow stock", "Willow shield"],
+        "Teak" => &["Teak stock"],
+        "Maple" => &["Arrow shaft", "Maple shortbow", "Maple longbow", "Maple stock", "Maple shield"],
+        "Mahogany" => &["Mahogany stock"],
+        "Yew" => &["Arrow shaft", "Yew shortbow", "Yew longbow", "Yew stock", "Yew shield"],
+        "Blisterwood" => &["Blisterwood stake"],
+        "Magic" => &["Arrow shaft", "Magic shortbow", "Magic longbow", "Magic stock", "Magic shield"],
+        "Redwood" => &["Arrow shaft", "Redwood shield", "Redwood hiking staff"],
+        _ => &[],
+    }
+}
+
+fn wood_modes<'a>(spot: &'a Place, tree: &str) -> Vec<&'a str> {
+    let mut modes: Vec<&str> = spot.modes.to_vec();
+    if wood_fletch(tree).is_empty() {
+        modes.retain(|mode| !mode.to_ascii_lowercase().contains("fletch"));
+    }
+    if modes.is_empty() {
+        modes.push("Powercut");
+    }
+    modes
+}
+
+fn wood_player_boost(location: &str, tree: &str) -> bool {
+    if tree.eq_ignore_ascii_case("Regular") {
+        return false;
+    }
+    !matches!(location, "Woodcutting Guild" | "Darkmeyer" | "Fossil Island")
+}
+
+fn wood_forestry(location: &str, tree: &str) -> bool {
+    if matches!(tree, "Regular" | "Blisterwood" | "Arctic pine" | "Camphor" | "Rosewood") {
+        return false;
+    }
+    !matches!(location, "Woodcutting Guild" | "Fossil Island")
+}
+
 fn wood_page(ui: &mut Ui, values: &mut HashMap<String, String>) {
-    let names: Vec<&str> = skillcatalog::WOOD.iter().map(|place| place.name).collect();
+    let mut names: Vec<&str> = skillcatalog::WOOD.iter().map(|place| place.name).collect();
+    names.sort_by(|left, right| left.to_ascii_lowercase().cmp(&right.to_ascii_lowercase()));
     let mut location = text(values, "Location");
+    if location.eq_ignore_ascii_case("Ironwood") {
+        location = "Sunbleak Island".to_string();
+    }
+    location = snap_choice(&location, &names);
     choose(ui, "wc-location", "Location", &mut location, &names);
     values.insert("Location".into(), location.clone());
     let Some(spot) = place(skillcatalog::WOOD, &location) else {
         return;
     };
-    let mut tree = text(values, "Tree");
+    let mut tree = snap_choice(&text(values, "Tree"), spot.methods);
     choose(ui, "wc-tree", "Tree", &mut tree, spot.methods);
     values.insert("Tree".into(), tree.clone());
-    let mut mode = text(values, "Mode");
+    let modes = wood_modes(spot, &tree);
+    let mut mode = snap_choice(&text(values, "Mode"), &modes);
     choose_tip(
         ui,
         "wc-mode",
         "Mode",
         "Bank keeps logs. Drop or burn options clear the inventory without banking. Fletch options cut and fletch on the spot.",
         &mut mode,
-        spot.modes,
+        &modes,
     );
     values.insert("Mode".into(), mode.clone());
-    if mode.contains("Fletch") && !spot.extras.is_empty() {
-        let mut item = text(values, "FletchItem");
-        choose_tip(ui, "wc-fletch", "Fletch", "Item to fletch from the logs before banking or dropping.", &mut item, spot.extras);
+    let products = wood_fletch(&tree);
+    if mode.contains("Fletch") && !products.is_empty() {
+        let mut item = snap_choice(&text(values, "FletchItem"), products);
+        choose_tip(ui, "wc-fletch", "Fletch", "Item to fletch from the logs before banking or dropping.", &mut item, products);
         values.insert("FletchItem".into(), item);
+    } else if products.is_empty() {
+        values.insert("FletchItem".into(), String::new());
+    } else {
+        values.insert("FletchItem".into(), snap_choice(&text(values, "FletchItem"), products));
     }
-    checkbox_tip(
-        ui,
-        "Stay near other players",
-        "Prefer chopping near other players when the location allows it.",
-        values,
-        "StayNearPlayers",
-        false,
-    );
-    checkbox_tip(
-        ui,
-        "Prefer forestry worlds",
-        "Prefer worlds where forestry events are more common.",
-        values,
-        "PreferForestryWorlds",
-        false,
-    );
-    ui.add_space(8.0);
-    ui.label(RichText::new("Forestry events").strong());
-    checkbox_tip(ui, "Rising Roots", "Chop anima-infused roots when the green tile uptext is fused.", values, "ForestryRisingRoots", true);
-    checkbox_tip(ui, "Beehive", "Build unfinished beehives from logs in the inventory.", values, "ForestryBeehive", true);
-    checkbox_tip(ui, "Enchantment Ritual", "Stand on the green ritual tile.", values, "ForestryRitual", true);
-    checkbox_tip(ui, "Woodcutting Leprechaun", "Stand on the rainbow and keep the luck buff.", values, "ForestryLeprechaun", true);
-    checkbox_tip(ui, "Poachers", "Disarm fox traps until they stop spawning.", values, "ForestryPoachers", true);
+    let stay_allowed = wood_player_boost(&location, &tree);
+    let stay = if stay_allowed {
+        checkbox_tip(
+            ui,
+            "Stay near other players",
+            "Prefer chopping near other players when the location allows it.",
+            values,
+            "StayNearPlayers",
+            false,
+        )
+    } else {
+        set_flag(values, "StayNearPlayers", false);
+        false
+    };
+    if stay {
+        checkbox_tip(
+            ui,
+            "Prefer forestry worlds",
+            "When hopping, only use members Forestry worlds.",
+            values,
+            "PreferForestryWorlds",
+            false,
+        );
+    } else {
+        set_flag(values, "PreferForestryWorlds", false);
+    }
+    if wood_forestry(&location, &tree) {
+        ui.add_space(8.0);
+        ui.label(RichText::new("Forestry events").strong());
+        checkbox_tip(ui, "Rising Roots", "Chop anima-infused roots when the green tile uptext is fused.", values, "ForestryRisingRoots", true);
+        checkbox_tip(ui, "Beehive", "Build unfinished beehives from logs in the inventory.", values, "ForestryBeehive", true);
+        checkbox_tip(ui, "Enchantment Ritual", "Stand on the green ritual tile.", values, "ForestryRitual", true);
+        checkbox_tip(ui, "Woodcutting Leprechaun", "Stand on the rainbow and keep the luck buff.", values, "ForestryLeprechaun", true);
+        checkbox_tip(ui, "Poachers", "Disarm fox traps until they stop spawning.", values, "ForestryPoachers", true);
+    } else {
+        for key in ["ForestryRisingRoots", "ForestryBeehive", "ForestryRitual", "ForestryLeprechaun", "ForestryPoachers"] {
+            set_flag(values, key, false);
+        }
+    }
     if location == "Isle of Souls" && tree == "Teak" {
         checkbox_tip(
             ui,
@@ -494,9 +591,21 @@ fn wood_page(ui: &mut Ui, values: &mut HashMap<String, String>) {
             "SoulsCloseTeaks",
             false,
         );
+    } else {
+        set_flag(values, "SoulsCloseTeaks", false);
     }
-    if spot.side {
+    if spot.side && !spot.returns.is_empty() {
         side_runs(ui, values, "EnableBirdhouseRuns", spot.returns);
+        let mut method = text(values, "ReturnMethod");
+        if method.is_empty() {
+            method = text(values, "BankReturnMethod");
+        }
+        method = snap_choice(&method, spot.returns);
+        store_return(values, &method);
+    } else {
+        set_flag(values, "EnableFarmRuns", false);
+        set_flag(values, "EnableBirdhouseRuns", false);
+        store_return(values, "(none)");
     }
 }
 
@@ -1433,6 +1542,26 @@ static SPECS: &[Spec] = &[
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn wood_options_follow_the_location_and_tree() {
+        let fossil = place(skillcatalog::WOOD, "Fossil Island").unwrap();
+        assert_eq!(fossil.returns, &["Digsite pendant"]);
+        assert!(wood_modes(fossil, "Camphor").iter().all(|mode| !mode.to_ascii_lowercase().contains("fletch")));
+        assert_eq!(wood_fletch("Teak"), &["Teak stock"]);
+        assert!(wood_fletch("Yew").contains(&"Yew shortbow"));
+        assert!(!wood_fletch("Yew").contains(&"Oak shortbow"));
+        assert!(!wood_player_boost("Fossil Island", "Teak"));
+        assert!(wood_player_boost("Seers' Village", "Yew"));
+        assert!(!wood_player_boost("Varrock east", "Regular"));
+        assert!(!wood_forestry("Fossil Island", "Teak"));
+        assert!(!wood_forestry("Woodcutting Guild", "Yew"));
+        assert!(!wood_forestry("Neitiznot", "Arctic pine"));
+        assert!(wood_forestry("Seers' Village", "Maple"));
+        assert!(!place(skillcatalog::WOOD, "Darkmeyer").unwrap().side);
+        assert_eq!(snap_choice("Yew shortbow", wood_fletch("Oak")), "Arrow shaft");
+        assert_eq!(snap_choice("Digsite pendant", fossil.returns), "Digsite pendant");
+    }
 
     #[test]
     fn bank_side_runs_follow_the_script() {
