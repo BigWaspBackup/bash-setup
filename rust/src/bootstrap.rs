@@ -195,46 +195,8 @@ fn launch_simba(paths: &SimbaPaths) -> Result<(), String> {
         .map_err(|e| format!("Failed to start Simba: {e}"))
 }
 
-/// After a newer BASH.exe has been downloaded, ask to restart into it now.
-/// Returns true when this process should exit.
-fn offer_launcher_restart(
-    paths: &SimbaPaths,
-    state: &BashState,
-    worker: &Worker,
-    opts: &Options,
-    just_swapped: bool,
-) -> bool {
-    if opts.silent || opts.no_launch {
-        return false;
-    }
-    let exe = paths.bootstrapper_exe();
-    let staged = PathBuf::from(format!("{}.new", exe.display())).exists();
-    if !staged && !just_swapped {
-        return false;
-    }
-    let latest = state.bootstrapper.latest.trim();
-    let body = if latest.is_empty() {
-        "A new launcher update has been downloaded.\n\nRestart now to install it?".to_string()
-    } else {
-        format!("A new launcher update ({latest}) has been downloaded.\n\nRestart now to install it?")
-    };
-    let changelog = versions::latest_release_notes(versions::SETUP_REPO.0, versions::SETUP_REPO.1)
-        .unwrap_or_else(|error| {
-            log_line(&format!("launcher changelog: {error}"));
-            "Could not load the changelog.".to_string()
-        });
-    if !worker.ask_with_changelog(body, "Yes", "No", changelog) {
-        return false;
-    }
-    if staged && !install::finish_self_update(paths) {
-        worker.error("Could not install the launcher update.");
-        if !worker.answers.recv().unwrap_or(false) {
-            let _ = worker.tx.send(WorkerMsg::Done);
-            return true;
-        }
-        return false;
-    }
-    match Command::new(&exe).current_dir(&paths.root).spawn() {
+fn restart_launcher(paths: &SimbaPaths, worker: &Worker) -> bool {
+    match Command::new(paths.bootstrapper_exe()).current_dir(&paths.root).spawn() {
         Ok(_) => {
             log_line("restarting into the new launcher");
             let _ = worker.tx.send(WorkerMsg::Done);
@@ -249,6 +211,43 @@ fn offer_launcher_restart(
             false
         }
     }
+}
+
+/// Keep the installed BASH.exe on the newest release without asking.
+/// A downloaded update is installed and this process restarts into it.
+/// Returns true when this process should exit.
+fn apply_launcher_update(
+    paths: &SimbaPaths,
+    state: &mut BashState,
+    worker: &Worker,
+    opts: &Options,
+    just_swapped: bool,
+) -> bool {
+    if opts.silent || opts.no_launch {
+        versions::refresh_app_version(paths, state, just_swapped);
+        return false;
+    }
+    if just_swapped {
+        worker.status("Restarting into the new launcher...");
+        return restart_launcher(paths, worker);
+    }
+    worker.status("Checking for a launcher update...");
+    versions::refresh_app_version(paths, state, false);
+    let staged = PathBuf::from(format!("{}.new", paths.bootstrapper_exe().display())).exists();
+    if !staged {
+        return false;
+    }
+    worker.status("Installing the launcher update...");
+    if !install::finish_self_update(paths) {
+        worker.error("Could not install the launcher update.");
+        if !worker.answers.recv().unwrap_or(false) {
+            let _ = worker.tx.send(WorkerMsg::Done);
+            return true;
+        }
+        return false;
+    }
+    worker.status("Restarting into the new launcher...");
+    restart_launcher(paths, worker)
 }
 
 fn center_launcher_window() -> bool {
@@ -349,6 +348,10 @@ fn run_worker(opts: &Options, worker: Worker) {
     }
 
     let mut state = BashState::load(&paths.state_file());
+    if apply_launcher_update(&paths, &mut state, &worker, opts, just_swapped) {
+        let _ = state.save(&paths.state_file());
+        return;
+    }
     let mut pending: Vec<UpdateItem> = Vec::new();
     let mut offline = false;
 
@@ -636,11 +639,7 @@ fn run_worker(opts: &Options, worker: Worker) {
         }
     }
 
-    versions::refresh_app_version(&paths, &mut state, just_swapped);
     let _ = state.save(&paths.state_file());
-    if offer_launcher_restart(&paths, &state, &worker, opts, just_swapped) {
-        return;
-    }
 
     worker.progress(1.0);
     if opts.reinstall_libraries && !pending.iter().any(|item| matches!(item.action, Action::Package { .. })) {

@@ -737,7 +737,7 @@ impl Launcher {
                 let version_note = if self.app_status == "available" && !self.running_installed_copy() && !self.update_staged() {
                     Some("A newer launcher is published. This window is not the installed BASH.exe, so it was not replaced.")
                 } else if self.app_status == "available" || self.update_staged() {
-                    Some("A new launcher is downloaded. Close BASH and open it again, then choose Yes to restart into it.")
+                    Some("A new launcher is downloaded. It installs automatically the next time BASH opens.")
                 } else if self.app_status == "restart" {
                     Some("The newer launcher is already in place. Close BASH and open it again.")
                 } else if self.app_status == "offline" {
