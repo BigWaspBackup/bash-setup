@@ -330,7 +330,6 @@ impl Editor {
         editor.client_hwnd = Some(client.hwnd);
         if script.name.eq_ignore_ascii_case("Tormented Demons") {
             editor.gear = Some(crate::gear::Editor::load(paths, &saved_as));
-            editor.page = Page::Gear;
         }
         editor
     }

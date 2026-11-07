@@ -581,7 +581,7 @@ fn wood_page(ui: &mut Ui, values: &mut HashMap<String, String>) {
         values.insert("FletchItem".into(), snap_choice(&text(values, "FletchItem"), products));
     }
     let stay_allowed = wood_player_boost(&location, &tree);
-    let stay = if stay_allowed {
+    if stay_allowed {
         checkbox_tip(
             ui,
             "Stay near other players",
@@ -589,32 +589,28 @@ fn wood_page(ui: &mut Ui, values: &mut HashMap<String, String>) {
             values,
             "StayNearPlayers",
             false,
-        )
-    } else {
-        set_flag(values, "StayNearPlayers", false);
-        false
-    };
-    if stay {
-        checkbox_tip(
-            ui,
-            "Prefer forestry worlds",
-            "When hopping, only use members Forestry worlds.",
-            values,
-            "PreferForestryWorlds",
-            false,
         );
     } else {
-        set_flag(values, "PreferForestryWorlds", false);
+        set_flag(values, "StayNearPlayers", false);
     }
     if wood_forestry(&location, &tree) {
         ui.add_space(8.0);
         ui.label(RichText::new("Forestry events").strong());
+        checkbox_tip(
+            ui,
+            "Prefer forestry worlds",
+            "Hop only on members Forestry worlds. Timed hops, break hops, and every other hop use that list.",
+            values,
+            "PreferForestryWorlds",
+            false,
+        );
         checkbox_tip(ui, "Rising Roots", "Chop anima-infused roots when the green tile uptext is fused.", values, "ForestryRisingRoots", true);
         checkbox_tip(ui, "Beehive", "Build unfinished beehives from logs in the inventory.", values, "ForestryBeehive", true);
         checkbox_tip(ui, "Enchantment Ritual", "Stand on the green ritual tile.", values, "ForestryRitual", true);
         checkbox_tip(ui, "Woodcutting Leprechaun", "Stand on the rainbow and keep the luck buff.", values, "ForestryLeprechaun", true);
         checkbox_tip(ui, "Poachers", "Disarm fox traps until they stop spawning.", values, "ForestryPoachers", true);
     } else {
+        set_flag(values, "PreferForestryWorlds", false);
         for key in ["ForestryRisingRoots", "ForestryBeehive", "ForestryRitual", "ForestryLeprechaun", "ForestryPoachers"] {
             set_flag(values, key, false);
         }
