@@ -400,6 +400,34 @@ pub fn download_script(script: &ScriptEntry, paths: &SimbaPaths, license_key: &s
     Ok(dest)
 }
 
+pub struct ScriptUpdateResult {
+    pub updated: Vec<String>,
+    pub failed: Vec<String>,
+}
+
+/// Download a newer copy of each installed script the current license can use.
+pub fn update_installed_scripts(paths: &SimbaPaths, mut status: impl FnMut(&str)) -> Result<ScriptUpdateResult, String> {
+    let config = load_config(&paths.launcher_config());
+    let snapshot = fetch_catalog(&config.license_key, &config.install_id)?;
+    let entries = with_local(paths, &snapshot.scripts);
+    let mut updated = Vec::new();
+    let mut failed = Vec::new();
+    for script in entries {
+        if !script.update_available() {
+            continue;
+        }
+        if script.kind != "free" && !script.entitled {
+            continue;
+        }
+        status(&script.name);
+        match download_script(&script, paths, &config.license_key, &config.install_id) {
+            Ok(_) => updated.push(script.name),
+            Err(error) => failed.push(error),
+        }
+    }
+    Ok(ScriptUpdateResult { updated, failed })
+}
+
 fn get_json(client: &Client, url: &str, license_key: Option<&str>, install_id: &str) -> Result<Value, String> {
     let mut request = client
         .get(url)

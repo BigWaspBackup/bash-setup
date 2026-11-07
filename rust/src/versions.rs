@@ -476,6 +476,7 @@ fn stage_launcher_update(paths: &SimbaPaths, release: &Release) {
 }
 
 /// Quiet Simba / SRL-B / BashLib check. Updates the status line and does not install anything.
+/// The launcher executable is not checked here. That happens on startup and from Check for updates.
 pub fn refresh_library_record(paths: &SimbaPaths) {
     let mut state = state::BashState::load(&paths.state_file());
     let mut offline = false;
@@ -540,7 +541,6 @@ pub fn refresh_library_record(paths: &SimbaPaths) {
         }
     }
 
-    refresh_app_version(paths, &mut state, false);
     state.touch();
     let fresh = state::BashState::load(&paths.state_file());
     state.accounts = fresh.accounts;

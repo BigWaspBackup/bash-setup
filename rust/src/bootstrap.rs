@@ -15,10 +15,10 @@ use std::{
 };
 
 use crate::{
-    download, install,
+    catalog, download, install,
     launcher::Launcher,
     locks,
-    log::{log_line, log_path, set_log_name},
+    log::{self, log_line, log_path, set_log_name},
     paths::{self, SimbaPaths},
     profile,
     state::{self, BashState},
@@ -55,6 +55,8 @@ struct Options {
     force_update: bool,
     /// Download SRL-B and BashLib again even when the installed versions match.
     reinstall_libraries: bool,
+    /// Check for updates was pressed: apply library, script, and launcher updates.
+    check_updates: bool,
     no_launch: bool,
     silent: bool,
     root: PathBuf,
@@ -65,6 +67,7 @@ impl Options {
         let mut opts = Options {
             force_update: false,
             reinstall_libraries: false,
+            check_updates: false,
             no_launch: false,
             silent: false,
             root: paths::simba_install_dir(),
@@ -348,7 +351,10 @@ fn run_worker(opts: &Options, worker: Worker) {
     }
 
     let mut state = BashState::load(&paths.state_file());
-    if apply_launcher_update(&paths, &mut state, &worker, opts, just_swapped) {
+    // Startup replaces BASH.exe before anything else. Check for updates does
+    // libraries and scripts first, then the launcher, so one click finishes
+    // before the restart.
+    if !opts.check_updates && apply_launcher_update(&paths, &mut state, &worker, opts, just_swapped) {
         let _ = state.save(&paths.state_file());
         return;
     }
@@ -474,7 +480,9 @@ fn run_worker(opts: &Options, worker: Worker) {
     state::write_library_status(&mut state, offline);
     let _ = state.save(&paths.state_file());
 
-    // Nothing to do (or offline): straight to Simba.
+    // Nothing to do (or offline): straight to the launcher.
+    let mut updated_libraries: Vec<String> = Vec::new();
+    let mut library_failures = false;
     let do_update = if pending.is_empty() {
         if offline {
             worker.status("Could not reach GitHub, starting Simba without updating.");
@@ -483,9 +491,9 @@ fn run_worker(opts: &Options, worker: Worker) {
     } else {
         let lines: Vec<String> = pending.iter().map(|i| format!("  - {}", i.describe())).collect();
         let fresh = pending.iter().all(|i| i.installed.is_empty());
-        if fresh || opts.force_update || opts.reinstall_libraries {
-            // Missing components, or an explicit "--update" from the launcher's
-            // Update button (already confirmed there): install without asking.
+        if fresh || opts.force_update || opts.reinstall_libraries || opts.check_updates {
+            // Missing components, an explicit reinstall, or Check for updates
+            // (already confirmed in the launcher): install without asking again.
             true
         } else {
             let body = format!(
@@ -614,6 +622,8 @@ fn run_worker(opts: &Options, worker: Worker) {
                 if let Err(e) = result {
                     log_line(&format!("{}: {e}", item.label));
                     failed.push(format!("{}: {e}", item.label));
+                } else {
+                    updated_libraries.push(item.label.clone());
                 }
                 worker.progress(p1);
             }
@@ -623,6 +633,7 @@ fn run_worker(opts: &Options, worker: Worker) {
             let _ = state.save(&paths.state_file());
 
             if !failed.is_empty() {
+                library_failures = true;
                 worker.error(format!(
                     "Some updates failed:\n\n{}\n\nLog: {}",
                     failed.join("\n"),
@@ -636,6 +647,18 @@ fn run_worker(opts: &Options, worker: Worker) {
             } else if opts.reinstall_libraries {
                 let _ = worker.tx.send(WorkerMsg::Notice("Libraries reinstalled.".to_string()));
             }
+        }
+    }
+
+    if opts.check_updates {
+        let script_note = update_scripts(&paths, &worker);
+        if apply_launcher_update(&paths, &mut state, &worker, opts, just_swapped) {
+            let _ = state.save(&paths.state_file());
+            return;
+        }
+        let note = check_summary(&updated_libraries, &script_note, library_failures);
+        if !note.is_empty() {
+            let _ = worker.tx.send(WorkerMsg::Notice(note));
         }
     }
 
@@ -677,6 +700,8 @@ struct BashApp {
     done: bool,
     phase: Phase,
     launcher: Option<Launcher>,
+    /// After Check for updates, reload the script list so new revisions show.
+    refresh_scripts: bool,
     launcher_started: bool,
     resized: bool,
     centered: bool,
@@ -717,6 +742,10 @@ impl eframe::App for BashApp {
                         self.question = None;
                         if let Some(launcher) = &mut self.launcher {
                             launcher.refresh_library_status();
+                            if self.refresh_scripts {
+                                self.refresh_scripts = false;
+                                launcher.reload_catalog();
+                            }
                         }
                     }
                     WorkerMsg::Done => self.done = true,
@@ -772,9 +801,9 @@ impl eframe::App for BashApp {
                 self.centered = true;
             }
             if reinstall {
-                self.begin_check(false, true);
+                self.begin_check(false, true, false);
             } else if recheck {
-                self.begin_check(false, false);
+                self.begin_check(false, false, true);
             } else if self.phase == Phase::Launcher {
                 // Idle frames follow input. A running script tails its log, so
                 // that case keeps a short refresh. Repainting the whole window
@@ -856,11 +885,19 @@ impl eframe::App for BashApp {
     }
 }
 
+impl Drop for BashApp {
+    fn drop(&mut self) {
+        log::mark_clean_exit();
+    }
+}
+
 impl BashApp {
-    fn begin_check(&mut self, force_update: bool, reinstall_libraries: bool) {
+    fn begin_check(&mut self, force_update: bool, reinstall_libraries: bool, check_updates: bool) {
         let mut opts = self.opts.clone();
         opts.force_update = force_update;
         opts.reinstall_libraries = reinstall_libraries;
+        opts.check_updates = check_updates;
+        self.refresh_scripts = check_updates;
         opts.no_launch = false;
         opts.silent = false;
         let (tx, rx) = mpsc::channel::<WorkerMsg>();
@@ -915,28 +952,72 @@ fn choice_width(ui: &egui::Ui, label: &str) -> f32 {
     (text.size().x + pad).clamp(96.0, 180.0)
 }
 
+fn update_scripts(paths: &SimbaPaths, worker: &Worker) -> String {
+    worker.status("Checking scripts...");
+    match catalog::update_installed_scripts(paths, |name| worker.status(format!("Updating {name}..."))) {
+        Err(error) => format!("Could not check scripts: {error}"),
+        Ok(result) => {
+            for failure in &result.failed {
+                log_line(&format!("script update: {failure}"));
+            }
+            let mut parts = Vec::new();
+            if !result.updated.is_empty() {
+                parts.push(format!("Updated {}.", result.updated.join(", ")));
+            }
+            if !result.failed.is_empty() {
+                parts.push(format!("Some scripts were not updated: {}", result.failed.join(" ")));
+            }
+            parts.join(" ")
+        }
+    }
+}
+
+fn check_summary(libraries: &[String], scripts: &str, had_failures: bool) -> String {
+    let mut parts = Vec::new();
+    if !libraries.is_empty() {
+        parts.push(format!("Updated {}.", libraries.join(", ")));
+    }
+    if !scripts.is_empty() {
+        parts.push(scripts.to_string());
+    }
+    if parts.is_empty() {
+        if had_failures {
+            String::new()
+        } else {
+            "Already up to date.".into()
+        }
+    } else {
+        parts.join(" ")
+    }
+}
+
 pub fn run() {
+    let opts = Options::parse();
+    log::set_data_dir(SimbaPaths::new(opts.root.clone()).bash_data());
     set_log_name("bash-bootstrapper.log");
-    log_line("BASH.exe starting");
     let previous_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
-        log_line(&format!("panic: {info}"));
+        let trace = std::backtrace::Backtrace::force_capture();
+        log::record_panic(&format!("{info}\n\n{trace}"));
         previous_hook(info);
     }));
+    log::note_previous_sessions();
+    log::begin_session();
+    log_line("BASH.exe starting");
 
     if crate::repair::requested() {
         log_line("repair mode");
         crate::repair::run_window();
+        log::mark_clean_exit();
         return;
     }
-
-    let opts = Options::parse();
     let (tx, rx) = mpsc::channel::<WorkerMsg>();
     let (answer_tx, answer_rx) = mpsc::channel::<bool>();
     let worker = Worker { tx, answers: answer_rx, silent: opts.silent };
 
     if opts.silent {
         run_worker(&opts, worker);
+        log::mark_clean_exit();
         return;
     }
 
@@ -956,6 +1037,7 @@ pub fn run() {
         done: false,
         phase: Phase::Check,
         launcher: None,
+        refresh_scripts: false,
         launcher_started: false,
         resized: false,
         centered: false,

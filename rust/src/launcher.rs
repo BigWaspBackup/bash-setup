@@ -55,6 +55,7 @@ enum ExtraAction {
     Repair,
     InstallLib(String),
     Copied,
+    CopyLogs,
 }
 
 enum NetMsg {
@@ -718,6 +719,34 @@ impl Launcher {
                 });
                 ui.add_space(10.0);
 
+                ui.label(RichText::new("Crash logs").strong());
+                let crashes = crate::log::crash_count();
+                let crash_note = if crashes == 0 {
+                    "If BASH closes on its own, the next launch saves a crash log. Copy it and send it on Discord.".to_string()
+                } else if crashes == 1 {
+                    "1 crash log saved. Copy it and send it on Discord.".to_string()
+                } else {
+                    format!("{crashes} crash logs saved. Copy them and send them on Discord.")
+                };
+                let galley = egui::WidgetText::from(RichText::new(crash_note).weak().size(12.0)).into_galley(
+                    ui,
+                    Some(egui::TextWrapMode::Wrap),
+                    440.0,
+                    egui::TextStyle::Body,
+                );
+                ui.add(Label::new(galley));
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Copy crash logs").clicked() {
+                        ui.ctx().copy_text(crate::log::crash_report());
+                        action = Some(ExtraAction::CopyLogs);
+                    }
+                    if ui.button("Open crash logs").clicked() {
+                        action = Some(ExtraAction::Open(crate::log::crash_dir()));
+                    }
+                });
+                ui.add_space(10.0);
+
                 ui.label(RichText::new("Details").strong());
                 let details = egui::WidgetText::from(RichText::new(self.debug_info()).size(12.0)).into_galley(
                     ui,
@@ -829,6 +858,7 @@ impl Launcher {
             ExtraAction::Repair => self.repair_confirm = true,
             ExtraAction::InstallLib(name) => self.install_chosen_library(&name),
             ExtraAction::Copied => self.status = "Copied launcher details.".into(),
+            ExtraAction::CopyLogs => self.status = "Copied crash logs. Paste them into Discord.".into(),
         }
     }
 
@@ -942,7 +972,7 @@ impl Launcher {
             return;
         };
         if !chrome::ask_yes_no(&format!(
-            "Install {name} {}?\n\nEvery RuneLite client will be closed first — RemoteInput keeps the library DLLs open.\n\nUpdate libraries keeps this choice. Pick Latest here to go back to the normal release.",
+            "Install {name} {}?\n\nEvery RuneLite client will be closed first — RemoteInput keeps the library DLLs open.\n\nCheck for updates keeps this choice. Pick Latest here to go back to the normal release.",
             spec.label
         )) {
             return;
@@ -1010,7 +1040,10 @@ impl Launcher {
                 return;
             }
             match crate::repair::launch_elevated() {
-                Ok(()) => std::process::exit(0),
+                Ok(()) => {
+                    crate::log::mark_clean_exit();
+                    std::process::exit(0);
+                }
                 Err(error) => self.status = error,
             }
         }
@@ -1381,7 +1414,8 @@ impl Launcher {
         self.poll_library_check();
     }
 
-    /// The startup check already ran. While the window stays open, look again each hour.
+    /// Library status is refreshed while the window stays open.
+    /// BASH.exe itself is only updated at startup, or from Check for updates.
     fn poll_library_check(&mut self) {
         let finished = self.library_check_rx.as_ref().map(|rx| rx.try_recv());
         if matches!(finished, Some(Ok(())) | Some(Err(mpsc::TryRecvError::Disconnected))) {
@@ -1447,13 +1481,14 @@ impl Launcher {
                 ui.vertical(|ui| {
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         if ui
-                            .add_enabled(!self.script_running(), Button::new("Update libraries"))
-                            .on_hover_text("Check Simba, SRL-B and BashLib for updates")
+                            .add_enabled(!self.script_running(), Button::new("Check for updates"))
+                            .on_hover_text("Check the launcher, libraries, and installed scripts, then download and apply updates")
+                            .on_disabled_hover_text("Stop the running script first.")
                             .clicked()
                         {
                             self.recheck_requested = true;
                         }
-                        if ui.button("Settings").on_hover_text("Output, remote input, folders, repair, and library versions").clicked() {
+                        if ui.button("Settings").on_hover_text("Output, remote input, folders, repair, library versions, and crash logs").clicked() {
                             self.settings_open = true;
                         }
                         ui.separator();
@@ -1475,7 +1510,7 @@ impl Launcher {
                 });
             });
             if self.script_running() {
-                ui.label(RichText::new("Stop the running script before updating libraries.").weak());
+                ui.label(RichText::new("Stop the running script before checking for updates.").weak());
             }
             ui.add_space(4.0);
 
@@ -2044,7 +2079,7 @@ impl Launcher {
         let _ = state.save(&path);
     }
 
-    fn reload_catalog(&mut self) {
+    pub fn reload_catalog(&mut self) {
         self.loading = true;
         self.fetch_gen += 1;
         let gen = self.fetch_gen;

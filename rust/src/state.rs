@@ -32,7 +32,7 @@ pub struct ComponentState {
 }
 
 impl ComponentState {
-    /// True when Update libraries should change this component.
+    /// True when Check for updates should change this component.
     pub fn is_behind(&self) -> bool {
         if self.track.is_empty() {
             return !self.latest.is_empty() && self.installed != self.latest;
