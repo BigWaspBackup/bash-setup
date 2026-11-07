@@ -66,6 +66,7 @@ pub struct Editor {
     loadout: [String; 2],
     style: [String; 2],
     punish: bool,
+    mark_of_darkness: bool,
     editing: usize,
     draft: String,
     draft_for: usize,
@@ -104,7 +105,7 @@ impl Drop for ReadJob {
 }
 
 impl Editor {
-    pub fn load(paths: &SimbaPaths) -> Self {
+    pub fn load(paths: &SimbaPaths, account: &str) -> Self {
         let catalog = Catalog::load(&paths.include("BashLib").join("utils").join("data").join("gear.json"));
         let gear_path = paths.configs().join("gearhandler.json");
         let (sets, broken) = match fs::read_to_string(&gear_path) {
@@ -128,6 +129,7 @@ impl Editor {
                 style_or(crate::agility::ini_get(&gear, "Loadout2Style").as_deref().unwrap_or(""), "Ranged"),
             ],
             punish: crate::agility::ini_bool(&gear, "Punish", false),
+            mark_of_darkness: saved_mark_of_darkness(&ini, account),
             editing: 0,
             draft: String::new(),
             draft_for: usize::MAX,
@@ -214,14 +216,6 @@ impl Editor {
                 ui.add_space(8.0);
                 self.slot_picker(ui, busy);
                 ui.add_space(8.0);
-                ui.horizontal(|ui| {
-                    ui.checkbox(&mut self.punish, "Punish");
-                    crate::ui::help_tip(
-                        ui,
-                        "After a fire bomb, use a crush or ranged weapon from the backpack for one hit.",
-                    );
-                });
-                ui.add_space(8.0);
                 let has_set = self.current_index().is_some();
                 let mut read = false;
                 let mut create = false;
@@ -251,6 +245,21 @@ impl Editor {
                         .clicked();
                     crate::ui::help_tip(ui, "Click a slot on the equipment screen, then pick an item on the right.");
                 });
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    ui.checkbox(&mut self.punish, "Punish");
+                    crate::ui::help_tip(
+                        ui,
+                        "After a fire bomb, use a crush or ranged weapon from the backpack for one hit.",
+                    );
+                });
+                ui.horizontal(|ui| {
+                    ui.checkbox(&mut self.mark_of_darkness, "Mark of Darkness");
+                    crate::ui::help_tip(
+                        ui,
+                        "Keep Mark of Darkness up during the session. Requires the Arceuus spellbook.",
+                    );
+                });
                 if !self.note.is_empty() {
                     ui.add_space(4.0);
                     ui.label(RichText::new(&self.note).color(note_color(&self.note)));
@@ -268,7 +277,7 @@ impl Editor {
                     self.delete_current();
                 }
                 if save {
-                    self.note = match self.persist(paths) {
+                    self.note = match self.persist(paths, account) {
                         Ok(()) => "Gear saved.".into(),
                         Err(err) => err,
                     };
@@ -305,7 +314,7 @@ impl Editor {
         Ok(())
     }
 
-    pub fn persist(&mut self, paths: &SimbaPaths) -> Result<(), String> {
+    pub fn persist(&mut self, paths: &SimbaPaths, account: &str) -> Result<(), String> {
         if self.broken {
             return Err("Gear sets could not be read, so they were left unchanged.".into());
         }
@@ -335,6 +344,15 @@ impl Editor {
             ("Punish", if self.punish { "True".into() } else { "False".into() }),
         ];
         let text = crate::agility::write_section(&existing, "Gear", &pairs);
+        let combat = format!("{} Combat", account.trim());
+        let text = crate::agility::write_section(
+            &text,
+            &combat,
+            &[(
+                "MarkOfDarkness",
+                if self.mark_of_darkness { "True".to_string() } else { "False".to_string() },
+            )],
+        );
         fs::write(ini_path, text).map_err(|_| "Could not save gear settings.".to_string())?;
         Ok(())
     }
@@ -1087,6 +1105,15 @@ fn unique_name(sets: &[Set], base: &str) -> String {
         }
     }
     format!("{base} {}", sets.len() + 1)
+}
+
+fn saved_mark_of_darkness(ini: &str, account: &str) -> bool {
+    let named = crate::agility::ini_section(ini, &format!("{} Combat", account.trim()));
+    if crate::agility::ini_get(&named, "MarkOfDarkness").is_some() {
+        return crate::agility::ini_bool(&named, "MarkOfDarkness", false);
+    }
+    let shared = crate::agility::ini_section(ini, "Combat");
+    crate::agility::ini_bool(&shared, "MarkOfDarkness", false)
 }
 
 fn resolve_loadout(sets: &[Set], section: &str, name_key: &str, index_key: &str) -> String {

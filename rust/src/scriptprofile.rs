@@ -3,6 +3,7 @@
 //! These are the same files the Simba form writes. The launcher can open any
 //! page on its own, and the AIO Agility run setup includes all of them.
 
+use std::collections::HashMap;
 use std::fs;
 
 use eframe::egui::{self, Button, ComboBox, RichText, ScrollArea};
@@ -83,6 +84,7 @@ struct Antiban {
 struct Webhook {
     enabled: bool,
     url: String,
+    ping_rare: bool,
     test_note: String,
 }
 
@@ -131,6 +133,8 @@ pub struct Editor {
     /// Empty once a saved profile is loaded, or the numbers are edited.
     antiban_hashed_for: Option<String>,
     webhook: Webhook,
+    prayer_hotkey: String,
+    inventory_hotkey: String,
     farm: Farm,
     bird: Birdhouse,
     show_pin: bool,
@@ -325,7 +329,7 @@ impl Editor {
         }
         editor.client_hwnd = Some(client.hwnd);
         if script.name.eq_ignore_ascii_case("Tormented Demons") {
-            editor.gear = Some(crate::gear::Editor::load(paths));
+            editor.gear = Some(crate::gear::Editor::load(paths, &saved_as));
             editor.page = Page::Gear;
         }
         editor
@@ -352,6 +356,7 @@ impl Editor {
             .filter(|name| !name.is_empty())
             .unwrap_or_else(|| account_key.to_string());
         let (antiban, antiban_hashed_for) = Antiban::load(&ini_text(&paths.configs().join("BASettings.ini")), &settings_key);
+        let (prayer_hotkey, inventory_hotkey) = load_hotkeys(paths, &settings_key);
         Self {
             page: Page::Accounts,
             run_script: None,
@@ -359,6 +364,8 @@ impl Editor {
             antiban,
             antiban_hashed_for,
             webhook: Webhook::load(&ini_text(&paths.configs().join("BASettings.ini")), &settings_key),
+            prayer_hotkey,
+            inventory_hotkey,
             farm: Farm::load(&ini_text(&paths.configs().join("BASHFarmSettings")), index),
             bird: Birdhouse::load(&ini_text(&paths.configs().join("BASHBirdHouseSettings")), index),
             accounts,
@@ -437,10 +444,10 @@ impl Editor {
     }
 
     pub fn save(&mut self, paths: &SimbaPaths) -> Result<(), String> {
-        if let Some(gear) = &mut self.gear {
-            gear.persist(paths)?;
-        }
         let key = self.account_key();
+        if let Some(gear) = &mut self.gear {
+            gear.persist(paths, &key)?;
+        }
         if let Some(course) = &self.course {
             course.save(&paths.configs().join("BASettings.ini"), &key)?;
         }
@@ -449,7 +456,12 @@ impl Editor {
         }
         write_accounts(&paths.root.join("credentials.simba"), &self.accounts)?;
         self.antiban.save(&paths.configs().join("BASettings.ini"), &key)?;
-        self.webhook.save(&paths.configs().join("BASettings.ini"), &key)?;
+        let ping_rare = self
+            .run_script
+            .as_ref()
+            .is_some_and(|script| script.name.eq_ignore_ascii_case("Tormented Demons"));
+        self.webhook.save(&paths.configs().join("BASettings.ini"), &key, ping_rare)?;
+        save_hotkeys(&paths.configs().join("BASettings.ini"), &key, &self.prayer_hotkey, &self.inventory_hotkey)?;
         let index = self.selected;
         self.farm.save(&paths.configs().join("BASHFarmSettings"), index)?;
         self.bird.save(&paths.configs().join("BASHBirdHouseSettings"), index)?;
@@ -482,8 +494,11 @@ impl Editor {
             }
         }
         if self.gear.is_some() {
-            self.gear = Some(crate::gear::Editor::load(paths));
+            self.gear = Some(crate::gear::Editor::load(paths, &key));
         }
+        let (prayer_hotkey, inventory_hotkey) = load_hotkeys(paths, &key);
+        self.prayer_hotkey = prayer_hotkey;
+        self.inventory_hotkey = inventory_hotkey;
         self.selected = index;
     }
 
@@ -612,15 +627,28 @@ pub fn show(ctx: &egui::Context, paths: &SimbaPaths, editor: &mut Editor) -> Edi
                                 .get(editor.selected)
                                 .map(|account| account.name.trim().to_string())
                                 .unwrap_or_default();
+                            let script_name = editor.run_script.as_ref().map(|script| script.name.clone());
                             let mut refreshed = false;
-                            antiban_page(ui, &mut editor.antiban, &label, &hash_name, &mut refreshed);
+                            antiban_page(
+                                ui,
+                                &mut editor.antiban,
+                                &label,
+                                &hash_name,
+                                &mut refreshed,
+                                script_name.as_deref(),
+                                editor.script.as_mut(),
+                            );
                             if refreshed {
                                 editor.antiban_hashed_for = Some(hash_name);
                             }
                         }
                         Page::Webhooks => {
                             let account = editor.selected_name();
-                            webhook_page(ui, &mut editor.webhook, &mut editor.show_webhook, &account);
+                            let ping_rare = editor
+                                .run_script
+                                .as_ref()
+                                .is_some_and(|script| script.name.eq_ignore_ascii_case("Tormented Demons"));
+                            webhook_page(ui, &mut editor.webhook, &mut editor.show_webhook, &account, ping_rare);
                         }
                         Page::Farm => {
                             let account = editor.selected_name();
@@ -857,6 +885,20 @@ fn accounts_page(ui: &mut egui::Ui, editor: &mut Editor, switch_to: &mut Option<
                 let current = editor.accounts[editor.selected].worlds.clone();
                 editor.worlds_picker.open_with(&current);
             }
+            ui.add_space(14.0);
+            ui.label(RichText::new("Game tabs").strong());
+            ui.label(RichText::new("Saved with this account. Every script uses these keys.").weak());
+            ui.add_space(4.0);
+            hotkey_row(ui, "Prayer hotkey", "The OSRS Controls key bound to the Prayer book. It must match Settings, Controls.", &mut editor.prayer_hotkey);
+            hotkey_row(
+                ui,
+                "Inventory hotkey",
+                "The OSRS Controls key bound to the Inventory. It must match Settings, Controls, and it cannot match the prayer hotkey.",
+                &mut editor.inventory_hotkey,
+            );
+            if editor.prayer_hotkey.eq_ignore_ascii_case(&editor.inventory_hotkey) {
+                editor.inventory_hotkey = next_hotkey(&editor.prayer_hotkey);
+            }
         });
     });
 }
@@ -875,14 +917,29 @@ fn tip_heading(ui: &mut egui::Ui, label: &str, tip: &str) {
     });
 }
 
-fn antiban_page(ui: &mut egui::Ui, antiban: &mut Antiban, label: &str, account: &str, refreshed: &mut bool) {
+fn antiban_page(
+    ui: &mut egui::Ui,
+    antiban: &mut Antiban,
+    label: &str,
+    account: &str,
+    refreshed: &mut bool,
+    script: Option<&str>,
+    mut activity: Option<&mut HashMap<String, String>>,
+) {
+    let chances = script.map(crate::scriptsetup::activity_chances).unwrap_or(&[]);
     for_account(ui, label);
     ui.horizontal(|ui| {
-        if ui.button("Randomise").on_hover_text("Picks new break, sleep, task, and world hop numbers.").clicked() {
+        if ui.button("Randomise").on_hover_text("Picks new break, sleep, task, world hop, and activity numbers.").clicked() {
             antiban.randomise();
+            if let Some(values) = activity.as_deref_mut() {
+                roll_activity(chances, values, account, true);
+            }
         }
         if ui.button("BioHash/Default").on_hover_text("Uses this account name, so the numbers stay the same every time.").clicked() {
             antiban.apply_biohash(account);
+            if let Some(values) = activity.as_deref_mut() {
+                roll_activity(chances, values, account, false);
+            }
             *refreshed = true;
         }
     });
@@ -933,6 +990,31 @@ fn antiban_page(ui: &mut egui::Ui, antiban: &mut Antiban, label: &str, account: 
             ui.label("%");
         });
     });
+    if !chances.is_empty() {
+        if let Some(values) = activity.as_deref_mut() {
+            ui.add_space(10.0);
+            tip_heading(
+                ui,
+                "Activity actions",
+                "Chances for this script. Randomise and BioHash/Default fill these along with the break and sleep numbers.",
+            );
+            for chance in chances {
+                let mut text = values.get(chance.key).cloned().unwrap_or_default();
+                if text.trim().is_empty() {
+                    text = chance.default.to_string();
+                }
+                ui.horizontal(|ui| {
+                    ui.label(chance.label);
+                    crate::ui::help_tip(ui, chance.tip);
+                    let response = ui.add(egui::TextEdit::singleline(&mut text).desired_width(52.0));
+                    if response.lost_focus() {
+                        text = text.trim().parse::<i32>().unwrap_or(chance.default).clamp(0, 100).to_string();
+                    }
+                });
+                values.insert(chance.key.to_string(), text);
+            }
+        }
+    }
     ui.add_space(10.0);
     tip_heading(
         ui,
@@ -992,7 +1074,7 @@ fn antiban_page(ui: &mut egui::Ui, antiban: &mut Antiban, label: &str, account: 
     });
 }
 
-fn webhook_page(ui: &mut egui::Ui, webhook: &mut Webhook, show_url: &mut bool, account: &str) {
+fn webhook_page(ui: &mut egui::Ui, webhook: &mut Webhook, show_url: &mut bool, account: &str, ping_rare: bool) {
     for_account(ui, account);
     tip_check(
         ui,
@@ -1022,6 +1104,15 @@ fn webhook_page(ui: &mut egui::Ui, webhook: &mut Webhook, show_url: &mut bool, a
                 webhook.test_note = test_webhook(&webhook.url);
             }
         });
+        if ping_rare {
+            ui.add_space(6.0);
+            tip_check(
+                ui,
+                &mut webhook.ping_rare,
+                "Ping on rare drop",
+                "When a Tormented synapse or Burning claw is looted, send a Discord webhook with a screenshot.",
+            );
+        }
     });
     if !webhook.test_note.is_empty() {
         ui.add_space(6.0);
@@ -1530,20 +1621,21 @@ impl Webhook {
         Self {
             enabled: agility::ini_bool(&body, "EnableWebhooks", false),
             url: agility::ini_get(&body, "WebhookURL").unwrap_or_default(),
+            ping_rare: agility::ini_bool(&body, "PingOnRareDrop", true),
             test_note: String::new(),
         }
     }
 
-    fn save(&self, path: &std::path::Path, account: &str) -> Result<(), String> {
+    fn save(&self, path: &std::path::Path, account: &str, ping_rare: bool) -> Result<(), String> {
+        let mut pairs = vec![
+            ("WebhookURL", self.url.trim().to_string()),
+            ("EnableWebhooks", bool_text(self.enabled)),
+        ];
+        if ping_rare {
+            pairs.push(("PingOnRareDrop", bool_text(self.ping_rare)));
+        }
         let existing = fs::read_to_string(path).unwrap_or_default();
-        let text = agility::write_section(
-            &existing,
-            &format!("{account} Webhook Settings"),
-            &[
-                ("WebhookURL", self.url.trim().to_string()),
-                ("EnableWebhooks", bool_text(self.enabled)),
-            ],
-        );
+        let text = agility::write_section(&existing, &format!("{account} Webhook Settings"), &pairs);
         fs::write(path, text).map_err(|e| format!("Could not save the webhook: {e}"))
     }
 }
@@ -1772,6 +1864,91 @@ fn scaled(base: i32, hash: f64) -> i32 {
 
 fn clamp_number(value: &str, min: i32, max: i32, default: i32) -> String {
     value.trim().parse::<i32>().unwrap_or(default).clamp(min, max).to_string()
+}
+
+fn roll_activity(chances: &[crate::scriptsetup::ActivityChance], values: &mut HashMap<String, String>, account: &str, random: bool) {
+    for chance in chances {
+        let value = if random {
+            roll_between(chance.low, chance.high + 1)
+        } else {
+            let span = (chance.high - chance.low).max(0);
+            chance.low + (field_hash(account, chance.key) * f64::from(span)).round() as i32
+        };
+        values.insert(chance.key.to_string(), value.clamp(0, 100).to_string());
+    }
+}
+
+const HOTKEYS: [&str; 8] = ["ESC", "F1", "F2", "F3", "F4", "F5", "F6", "F7"];
+
+fn snap_hotkey(value: &str, default: &str) -> String {
+    HOTKEYS
+        .iter()
+        .find(|item| item.eq_ignore_ascii_case(value.trim()))
+        .copied()
+        .unwrap_or(default)
+        .to_string()
+}
+
+fn next_hotkey(taken: &str) -> String {
+    HOTKEYS.iter().find(|item| !item.eq_ignore_ascii_case(taken)).copied().unwrap_or("F1").to_string()
+}
+
+fn hotkey_row(ui: &mut egui::Ui, label: &str, tip: &str, value: &mut String) {
+    let default = if label.to_ascii_lowercase().contains("inventory") { "ESC" } else { "F3" };
+    let mut current = snap_hotkey(value, default);
+    ui.horizontal(|ui| {
+        ui.label(label);
+        crate::ui::help_tip(ui, tip);
+        ComboBox::from_id_salt(("account-hotkey", label))
+            .width(120.0)
+            .selected_text(&current)
+            .show_ui(ui, |ui| {
+                for option in HOTKEYS {
+                    ui.selectable_value(&mut current, option.to_string(), option);
+                }
+            });
+    });
+    *value = current;
+}
+
+fn load_hotkeys(paths: &SimbaPaths, account: &str) -> (String, String) {
+    let settings = ini_text(&paths.configs().join("BASettings.ini"));
+    let controls = agility::ini_section(&settings, &format!("{account} Controls"));
+    let demons = ini_text(&paths.configs().join("tormenteddemons.ini"));
+    let combat = agility::ini_section(&demons, &format!("{account} Combat"));
+    let shared = agility::ini_section(&demons, "Combat");
+    let prayer = agility::ini_get(&controls, "PrayerHotkey")
+        .or_else(|| agility::ini_get(&combat, "PrayerHotkey"))
+        .or_else(|| agility::ini_get(&shared, "PrayerHotkey"))
+        .unwrap_or_else(|| "F3".into());
+    let inventory = agility::ini_get(&controls, "InventoryHotkey")
+        .or_else(|| agility::ini_get(&combat, "InventoryHotkey"))
+        .or_else(|| agility::ini_get(&shared, "InventoryHotkey"))
+        .unwrap_or_else(|| "ESC".into());
+    let prayer = snap_hotkey(&prayer, "F3");
+    let mut inventory = snap_hotkey(&inventory, "ESC");
+    if prayer.eq_ignore_ascii_case(&inventory) {
+        inventory = next_hotkey(&prayer);
+    }
+    (prayer, inventory)
+}
+
+fn save_hotkeys(path: &std::path::Path, account: &str, prayer: &str, inventory: &str) -> Result<(), String> {
+    let prayer = snap_hotkey(prayer, "F3");
+    let mut inventory = snap_hotkey(inventory, "ESC");
+    if prayer.eq_ignore_ascii_case(&inventory) {
+        inventory = next_hotkey(&prayer);
+    }
+    let existing = fs::read_to_string(path).unwrap_or_default();
+    let text = agility::write_section(
+        &existing,
+        &format!("{account} Controls"),
+        &[("PrayerHotkey", prayer), ("InventoryHotkey", inventory)],
+    );
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).ok();
+    }
+    fs::write(path, text).map_err(|error| format!("Could not save the account hotkeys: {error}"))
 }
 
 fn read_accounts(path: &std::path::Path) -> Vec<Account> {

@@ -186,10 +186,14 @@ struct Row {
     section: &'static str,
     tip: &'static str,
     kind: RowKind,
+    /// Hidden rows are still saved. The Antiban tab draws the activity chances.
+    visible: bool,
 }
 
 enum RowKind {
     Choice(&'static [&'static str]),
+    /// Like `Choice`, but an empty saved value starts on this index.
+    ChoiceAt(&'static [&'static str], usize),
     /// Stores the option index.
     Index(&'static [&'static str], usize),
     Check(bool),
@@ -1161,12 +1165,24 @@ fn vale_remap_decor(saved: &str, log: &str, options: &[String]) -> String {
 }
 
 fn rows_page(ui: &mut Ui, rows: &[Row], values: &mut HashMap<String, String>) {
+    let mut shown_section = "";
     for row in rows {
+        if !row.visible {
+            continue;
+        }
         let farm = flag(values, "EnableFarmRuns", false)
             || flag(values, "EnableBirdhouseRuns", false)
             || flag(values, "EnableBirdhouse", false);
         if matches!(row.key, "FarmReturnMethod" | "BirdhouseReturnMethod" | "BankReturnMethod") && !farm {
             continue;
+        }
+        if !row.section.is_empty() && row.section != shown_section {
+            if !shown_section.is_empty() {
+                ui.add_space(12.0);
+            }
+            ui.label(RichText::new(row.section).strong());
+            ui.add_space(4.0);
+            shown_section = row.section;
         }
         match row.kind {
             RowKind::Choice(options) => {
@@ -1183,6 +1199,16 @@ fn rows_page(ui: &mut Ui, rows: &[Row], values: &mut HashMap<String, String>) {
                 } else {
                     choose_tip(ui, row.key, row.label, row.tip, &mut current, options);
                 }
+                values.insert(row.key.to_string(), current);
+            }
+            RowKind::ChoiceAt(options, default) => {
+                let mut current = text(values, row.key);
+                if current.trim().is_empty() {
+                    if let Some(option) = options.get(default).or_else(|| options.first()) {
+                        current = (*option).to_string();
+                    }
+                }
+                choose_tip(ui, row.key, row.label, row.tip, &mut current, options);
                 values.insert(row.key.to_string(), current);
             }
             RowKind::Index(options, default) => {
@@ -1239,23 +1265,90 @@ const BANK_KEYS: &[&str] = &[
 ];
 
 const fn choice(key: &'static str, label: &'static str, options: &'static [&'static str]) -> Row {
-    Row { key, label, section: "", tip: "", kind: RowKind::Choice(options) }
+    Row { key, label, section: "", tip: "", kind: RowKind::Choice(options), visible: true }
+}
+const fn choice_at(options: &'static [&'static str], default: usize) -> RowKind {
+    RowKind::ChoiceAt(options, default)
 }
 const fn index(key: &'static str, label: &'static str, options: &'static [&'static str], default: usize) -> Row {
-    Row { key, label, section: "", tip: "", kind: RowKind::Index(options, default) }
+    Row { key, label, section: "", tip: "", kind: RowKind::Index(options, default), visible: true }
 }
 const fn check(key: &'static str, label: &'static str, default: bool) -> Row {
-    Row { key, label, section: "", tip: "", kind: RowKind::Check(default) }
+    Row { key, label, section: "", tip: "", kind: RowKind::Check(default), visible: true }
 }
 const fn number(key: &'static str, label: &'static str, default: &'static str) -> Row {
-    Row { key, label, section: "", tip: "", kind: RowKind::Number(default) }
+    Row { key, label, section: "", tip: "", kind: RowKind::Number(default), visible: true }
 }
 const fn filed(section: &'static str, key: &'static str, label: &'static str, kind: RowKind) -> Row {
-    Row { key, label, section, tip: "", kind }
+    Row { key, label, section, tip: "", kind, visible: true }
 }
 const fn tip(mut row: Row, tip: &'static str) -> Row {
     row.tip = tip;
     row
+}
+const fn hide(mut row: Row) -> Row {
+    row.visible = false;
+    row
+}
+
+pub struct ActivityChance {
+    pub key: &'static str,
+    pub label: &'static str,
+    pub tip: &'static str,
+    pub default: i32,
+    pub low: i32,
+    pub high: i32,
+}
+
+const TD_ACTIVITY: &[ActivityChance] = &[
+    ActivityChance {
+        key: "LadderWestChance",
+        label: "West ladder chance",
+        tip: "Chance to take the west ladder pair into the lair. 0 is always east, 100 is always west, 50 is roughly random each trip.",
+        default: 50,
+        low: 20,
+        high: 80,
+    },
+    ActivityChance {
+        key: "DemonSouthChance",
+        label: "South room chance",
+        tip: "Chance to fight the south Tormented Demon room. 0 is always north, 100 is always south.",
+        default: 0,
+        low: 0,
+        high: 40,
+    },
+    ActivityChance {
+        key: "OffensiveAfterAttackChance",
+        label: "Offensive after attack %",
+        tip: "When swapping gear, chance to re-click the demon before turning on the offensive prayer. 0 always prays then attacks.",
+        default: 0,
+        low: 0,
+        high: 40,
+    },
+    ActivityChance {
+        key: "BuffTimingChance",
+        label: "Buff timing %",
+        tip: "Chance to cast Mark of Darkness or thralls a bit late, or to skip a refresh cycle. 0 stays on time.",
+        default: 0,
+        low: 0,
+        high: 40,
+    },
+    ActivityChance {
+        key: "PrepProtectFirstChance",
+        label: "Protect before buffs %",
+        tip: "After gear is worn, chance to turn on protection prayer before the thrall or Mark of Darkness. 0 always buffs then protects.",
+        default: 40,
+        low: 15,
+        high: 70,
+    },
+];
+
+pub fn activity_chances(script: &str) -> &'static [ActivityChance] {
+    if script.eq_ignore_ascii_case("Tormented Demons") {
+        TD_ACTIVITY
+    } else {
+        &[]
+    }
 }
 
 static SPECS: &[Spec] = &[
@@ -1277,7 +1370,7 @@ static SPECS: &[Spec] = &[
         Kind::Lunar,
     ),
     rows(
-        &["AIO Mahogany Homes"],
+        &["Mahogany Homes", "AIO Mahogany Homes"],
         " MH Settings",
         &["Tier", "Contact", "Count", "Contractor", "Falador", "Ardougne", "Varrock", "Hosidius", "HouseEntry"],
         &[
@@ -1288,7 +1381,7 @@ static SPECS: &[Spec] = &[
             tip(choice("Falador", "Falador travel", &["Falador tablet", "Falador spell", "Ring of wealth", "Skills necklace", "Portal nexus", "Portal chamber"]), "How to reach Falador houses."),
             tip(choice("Ardougne", "Ardougne travel", &["Ardougne tablet", "Ardougne spell", "Portal nexus", "Portal chamber"]), "How to reach Ardougne houses."),
             tip(choice("Varrock", "Varrock travel", &["Varrock tablet", "Varrock spell", "Portal nexus", "Portal chamber"]), "How to reach Varrock houses."),
-            tip(choice("Hosidius", "Hosidius travel", &["Xeric's talisman", "House teleport outside", "House tablet outside", "Mounted Xeric's"]), "How to reach Hosidius houses."),
+            tip(choice("Hosidius", "Hosidius travel", &["Xeric's talisman", "House teleport, outside", "House tablet, outside", "Mounted Xeric's talisman"]), "How to reach Hosidius houses."),
             tip(choice("HouseEntry", "House entry", &["Spell", "Tablet", "Construction cape"]), "How to enter your player-owned house when a travel method needs it."),
         ],
     ),
@@ -1423,41 +1516,88 @@ static SPECS: &[Spec] = &[
         "tormenteddemons.ini",
         &[
             tip(
+                filed("Navigation", "BankLocation", "Bank", RowKind::Choice(&["Ferox Enclave (Ring)", "Ferox Enclave (POH)"])),
+                "Where to bank when supplies run low. Ferox (Ring) uses a Ring of dueling. Ferox (POH) teleports to your house jewellery box first.",
+            ),
+            tip(
+                filed("Navigation", "TravelMethod", "Return to lair", RowKind::Choice(&["Guthixian Temple Teleport", "Games Necklace (Chasm)"])),
+                "How to return to the Tormented Demon lair after banking. Guthixian Temple Teleport uses the scroll. Games Necklace uses the Tears of Guthix chasm route with a sapphire lantern.",
+            ),
+            tip(
+                filed(
+                    "Navigation",
+                    "POHTeleport",
+                    "House teleport",
+                    choice_at(&["Construct. cape", "Construct. cape(t)", "Teleport to house (tablet)"], 2),
+                ),
+                "How to enter your player-owned house when Bank or Travel needs the POH. The house layout is still set in the Simba House Builder tab.",
+            ),
+            tip(
                 filed("Combat", "EatAtPercent", "Eat at HP %", RowKind::Number("60")),
                 "Eat food when your Hitpoints % falls to this value or below during a fight.",
+            ),
+            tip(
+                filed("Combat", "FoodPerKill", "Food pts / kill", RowKind::Number("200")),
+                "Banking threshold based on healing points, not food item count. After topping up to full HP, this many food healing points must still remain before starting another kill. Example: sharks heal 20 each, so 10 sharks = 200 pts.",
             ),
             tip(
                 filed("Combat", "DrinkAtPercent", "Drink at prayer %", RowKind::Number("40")),
                 "Drink a prayer potion when your Prayer % falls to this value or below during a fight.",
             ),
             tip(
-                filed("Combat", "DodgePlanMs", "Dodge plan (ms)", RowKind::Choice(&["1000", "2000", "3000", "4000", "5000"])),
-                "How early (in milliseconds) to start planning and moving for bomb dodges. Default 2000ms. Fast PCs can use 1000ms; slower PCs should use about 3000-5000ms for more reliable dodges.",
-            ),
-            tip(
-                filed("Combat", "FoodPerKill", "Food per kill", RowKind::Number("200")),
-                "Banking threshold based on healing points, not food item count. After topping up to full HP, this many food healing points must still remain before starting another kill. Example: sharks heal 20 each, so 10 sharks = 200 pts.",
-            ),
-            tip(
-                filed("Combat", "PrayerPerKill", "Prayer per kill", RowKind::Number("124")),
+                filed("Combat", "PrayerPerKill", "Prayer pts / kill", RowKind::Number("124")),
                 "Banking threshold based on prayer points restored by potions, not dose count. After restoring to full Prayer, this many prayer points must still remain before starting another kill.",
+            ),
+            tip(
+                filed(
+                    "Combat",
+                    "SummonThrall",
+                    "Summon thrall",
+                    RowKind::Choice(&["None", "Ghost (Magic)", "Skeleton (Ranged)", "Zombie (Melee)", "Random"]),
+                ),
+                "Which Arceuus thrall to summon and refresh during combat. None disables thralls. Random picks Ghost, Skeleton, or Zombie each summon.",
+            ),
+            tip(
+                filed("Combat", "OffensivePrayers", "Offensive prayers", RowKind::Check(false)),
+                "Enable the strongest unlocked offensive prayer for the active attack style (Piety, Rigour, or Augury) in addition to protection prayers.",
+            ),
+            tip(
+                filed("Combat", "MaxKills", "Max kills (0 = unlimited)", RowKind::Number("0")),
+                "Stop the script after this many Tormented Demon kills. 0 means no kill limit.",
             ),
             tip(
                 filed("Combat", "StopAfterSlayerTask", "Stop after the slayer task", RowKind::Check(false)),
                 "Stop and logout when the Slayer task complete message appears in game chat.",
             ),
             tip(
-                filed("Navigation", "BankLocation", "Bank", RowKind::Choice(&["Ferox Enclave (Ring)", "Ferox Enclave (POH)"])),
-                "Where to bank when supplies run low. Ferox (Ring) uses a Ring of dueling. Ferox (POH) teleports to your house jewellery box first.",
+                filed(
+                    "Combat",
+                    "DodgePlanMs",
+                    "Dodge plan (ms)",
+                    choice_at(&["1000", "2000", "3000", "4000", "5000"], 1),
+                ),
+                "How early (in milliseconds) to start planning and moving for bomb dodges. Default 2000ms. Fast PCs can use 1000ms; slower PCs should use about 3000-5000ms for more reliable dodges.",
             ),
-            tip(
-                filed("Navigation", "TravelMethod", "Travel", RowKind::Choice(&["Guthixian Temple Teleport", "Games Necklace (Chasm)"])),
-                "How to return to the Tormented Demon lair after banking. Guthixian Temple Teleport uses the scroll. Games Necklace uses the Tears of Guthix chasm route with a sapphire lantern.",
-            ),
-            tip(
-                filed("Navigation", "POHTeleport", "House teleport", RowKind::Choice(&["Construct. cape", "Construct. cape(t)", "Teleport to house (tablet)"])),
-                "How to enter your player-owned house when Bank or Travel needs the POH.",
-            ),
+            hide(tip(
+                filed("Antiban", "LadderWestChance", "West ladder chance (0-100)", RowKind::Number("50")),
+                "Chance to take the west ladder pair into the lair. 0 is always east, 100 is always west, 50 is roughly random each trip.",
+            )),
+            hide(tip(
+                filed("Antiban", "DemonSouthChance", "South room chance (0-100)", RowKind::Number("0")),
+                "Chance to fight the south Tormented Demon room. 0 is always north, 100 is always south.",
+            )),
+            hide(tip(
+                filed("Antiban", "OffensiveAfterAttackChance", "Offensive after attack % (0-100)", RowKind::Number("0")),
+                "When swapping gear, chance to re-click the demon before turning on the offensive prayer. 0 always prays then attacks.",
+            )),
+            hide(tip(
+                filed("Antiban", "BuffTimingChance", "Buff timing antiban % (0-100)", RowKind::Number("0")),
+                "Chance to cast Mark of Darkness or thralls a bit late, or to skip a refresh cycle. 0 stays on time.",
+            )),
+            hide(tip(
+                filed("Antiban", "PrepProtectFirstChance", "Protect before buffs % (0-100)", RowKind::Number("40")),
+                "After gear is worn, chance to turn on protection prayer before the thrall or Mark of Darkness. 0 always buffs then protects.",
+            )),
         ],
     ),
     rows(
@@ -1614,6 +1754,36 @@ static SPECS: &[Spec] = &[
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tormented_demons_lists_the_script_form_options() {
+        let spec = spec_for("Tormented Demons").expect("tormented demons spec");
+        let visible: Vec<&str> = spec.rows.iter().filter(|row| row.visible).map(|row| row.key).collect();
+        assert_eq!(
+            visible,
+            vec![
+                "BankLocation",
+                "TravelMethod",
+                "POHTeleport",
+                "EatAtPercent",
+                "FoodPerKill",
+                "DrinkAtPercent",
+                "PrayerPerKill",
+                "SummonThrall",
+                "OffensivePrayers",
+                "MaxKills",
+                "StopAfterSlayerTask",
+                "DodgePlanMs",
+            ]
+        );
+        for chance in activity_chances("Tormented Demons") {
+            let row = spec.rows.iter().find(|row| row.key == chance.key).expect(chance.key);
+            assert!(!row.visible);
+            assert_eq!(row.section, "Antiban");
+        }
+        assert!(spec.rows.iter().all(|row| row.key != "MarkOfDarkness" && row.key != "DebugMode"));
+        assert!(spec.rows.iter().all(|row| row.key != "PrayerHotkey" && row.key != "InventoryHotkey"));
+    }
 
     #[test]
     fn smelter_follows_the_script_form() {
