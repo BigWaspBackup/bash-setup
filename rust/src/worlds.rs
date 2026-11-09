@@ -16,12 +16,13 @@ const LOCATIONS: [&str; 8] = [
     "South Africa",
 ];
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Activity {
     Normal,
     Dangerous,
     Restricted,
     Skill,
+    Hardcore,
 }
 
 struct World {
@@ -47,6 +48,7 @@ pub struct Picker {
     dangerous: bool,
     restricted: bool,
     skill: bool,
+    hardcore: bool,
     min_players: String,
     max_players: String,
     exclude: String,
@@ -68,6 +70,7 @@ impl Default for Picker {
             dangerous: false,
             restricted: false,
             skill: false,
+            hardcore: false,
             min_players: "0".into(),
             max_players: "2000".into(),
             exclude: String::new(),
@@ -94,14 +97,18 @@ impl Picker {
         self.dangerous = false;
         self.restricted = false;
         self.skill = false;
+        self.hardcore = false;
         if have.is_empty() {
             self.chosen = self.visible_numbers();
             return;
         }
+        let mut known = 0;
+        let mut hardcore_known = 0;
         for world in &self.worlds {
             if !have.contains(&world.number) {
                 continue;
             }
+            known += 1;
             if world.members {
                 self.members = true;
             } else {
@@ -115,8 +122,12 @@ impl Picker {
                 Activity::Dangerous => self.dangerous = true,
                 Activity::Restricted => self.restricted = true,
                 Activity::Skill => self.skill = true,
+                Activity::Hardcore => hardcore_known += 1,
             }
         }
+        // A saved list that is entirely hardcore worlds turns the box on.
+        // Mixed lists stay on the normal filter so those worlds remain visible.
+        self.hardcore = known > 0 && hardcore_known == known;
         self.chosen = have;
     }
 
@@ -136,14 +147,23 @@ impl Picker {
                 return false;
             }
         }
-        let activity_on = match world.activity {
-            Activity::Normal => self.normal,
-            Activity::Dangerous => self.dangerous,
-            Activity::Restricted => self.restricted,
-            Activity::Skill => self.skill,
-        };
-        if !activity_on {
+        if self.hardcore {
+            if world.activity != Activity::Hardcore {
+                return false;
+            }
+        } else if world.activity == Activity::Hardcore {
             return false;
+        } else {
+            let activity_on = match world.activity {
+                Activity::Normal => self.normal,
+                Activity::Dangerous => self.dangerous,
+                Activity::Restricted => self.restricted,
+                Activity::Skill => self.skill,
+                Activity::Hardcore => false,
+            };
+            if !activity_on {
+                return false;
+            }
         }
         let min = self.min_players.trim().parse::<i32>().unwrap_or(0);
         let max = self.max_players.trim().parse::<i32>().unwrap_or(2000);
@@ -180,6 +200,7 @@ pub fn show(ctx: &egui::Context, picker: &mut Picker) -> Option<String> {
             ui.horizontal(|ui| {
                 ui.checkbox(&mut picker.members, "Members");
                 ui.checkbox(&mut picker.free, "Free-to-play");
+                ui.checkbox(&mut picker.hardcore, "Hardcore worlds");
             });
             ui.label(RichText::new("Location").strong());
             ui.horizontal_wrapped(|ui| {
@@ -417,6 +438,10 @@ fn strip_tags(text: &str) -> String {
 
 fn classify_activity(text: &str) -> Activity {
     let upper = text.to_ascii_uppercase();
+    // Before PvP, so "Hardcore World - Group PvM" stays a hardcore world.
+    if upper.contains("HARDCORE") {
+        return Activity::Hardcore;
+    }
     if ["PVP", "DEADMAN", "RISK"].iter().any(|word| upper.contains(word)) {
         return Activity::Dangerous;
     }
@@ -434,7 +459,7 @@ fn classify_activity(text: &str) -> Activity {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_world_page;
+    use super::*;
 
     #[test]
     fn parses_a_world_row() {
@@ -462,5 +487,106 @@ mod tests {
         assert_eq!(worlds[0].players, 100);
         assert_eq!(worlds[1].number, 577);
         assert!(!worlds[1].members);
+    }
+
+    #[test]
+    fn hardcore_rows_are_their_own_activity() {
+        let html = r#"
+            <tr class='server-list__row'>
+                <td><a href='https://oldschool.runescape.com/game?world=302'>Old School 2</a></td>
+                <td>100 players</td>
+                <td>United Kingdom</td>
+                <td>Members</td>
+                <td>-</td>
+            </tr>
+            <tr class='server-list__row'>
+                <td><a href='https://oldschool.runescape.com/game?world=634'>Old School 334</a></td>
+                <td>40 players</td>
+                <td>United States</td>
+                <td>Members</td>
+                <td>Hardcore World</td>
+            </tr>
+            <tr class='server-list__row'>
+                <td><a href='https://oldschool.runescape.com/game?world=636'>Old School 336</a></td>
+                <td>20 players</td>
+                <td>United States</td>
+                <td>Members</td>
+                <td>Hardcore World - Wintertodt</td>
+            </tr>
+        "#;
+        let worlds = parse_world_page(html);
+        assert_eq!(worlds.len(), 3);
+        assert_eq!(worlds[0].activity, Activity::Normal);
+        assert_eq!(worlds[1].activity, Activity::Hardcore);
+        assert_eq!(worlds[2].activity, Activity::Hardcore);
+    }
+
+    #[test]
+    fn hardcore_toggle_shows_only_hardcore_worlds() {
+        let mut picker = Picker {
+            worlds: vec![
+                World {
+                    number: 302,
+                    players: 100,
+                    location: "United Kingdom".into(),
+                    members: true,
+                    activity: Activity::Normal,
+                    activity_text: "-".into(),
+                },
+                World {
+                    number: 634,
+                    players: 40,
+                    location: "United States".into(),
+                    members: true,
+                    activity: Activity::Hardcore,
+                    activity_text: "Hardcore World".into(),
+                },
+            ],
+            ..Picker::default()
+        };
+        assert!(picker.matches(&picker.worlds[0]));
+        assert!(!picker.matches(&picker.worlds[1]));
+        picker.hardcore = true;
+        assert!(!picker.matches(&picker.worlds[0]));
+        assert!(picker.matches(&picker.worlds[1]));
+    }
+
+    #[test]
+    fn reopening_a_hardcore_only_list_ticks_the_box() {
+        let mut picker = Picker {
+            worlds: vec![
+                World {
+                    number: 302,
+                    players: 100,
+                    location: "United Kingdom".into(),
+                    members: true,
+                    activity: Activity::Normal,
+                    activity_text: "-".into(),
+                },
+                World {
+                    number: 634,
+                    players: 40,
+                    location: "United States".into(),
+                    members: true,
+                    activity: Activity::Hardcore,
+                    activity_text: "Hardcore World".into(),
+                },
+            ],
+            pending: Some("634, 636".into()),
+            ..Picker::default()
+        };
+        picker.worlds.push(World {
+            number: 636,
+            players: 20,
+            location: "United States".into(),
+            members: true,
+            activity: Activity::Hardcore,
+            activity_text: "Hardcore World - Wintertodt".into(),
+        });
+        picker.apply_pending();
+        assert!(picker.hardcore);
+        assert!(picker.chosen.contains(&634));
+        assert!(picker.chosen.contains(&636));
+        assert!(!picker.matches(&picker.worlds[0]));
     }
 }
