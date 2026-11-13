@@ -422,7 +422,8 @@ fn hidden(program: impl AsRef<std::ffi::OsStr>) -> Command {
 }
 
 fn kill_install_processes() {
-    for image in ["Simba32.exe", "Simba64.exe", "RuneLite.exe", "JagexLauncher.exe", "bash-setup.exe", "BASH.exe"] {
+    let _ = crate::profile::close_runelite();
+    for image in ["Simba32.exe", "Simba64.exe", "JagexLauncher.exe", "bash-setup.exe", "BASH.exe"] {
         let _ = hidden("taskkill").args(["/F", "/IM", image]).status();
     }
 }

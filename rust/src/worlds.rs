@@ -176,7 +176,7 @@ impl Picker {
 }
 
 /// Draws the generator. `Some` is the comma-separated list to store.
-pub fn show(ctx: &egui::Context, picker: &mut Picker) -> Option<String> {
+pub fn show(ctx: &egui::Context, picker: &mut Picker, enabled: bool) -> Option<String> {
     if !picker.open {
         return None;
     }
@@ -192,6 +192,7 @@ pub fn show(ctx: &egui::Context, picker: &mut Picker) -> Option<String> {
     egui::Window::new("Generate worlds")
         .collapsible(false)
         .resizable(false)
+        .enabled(enabled)
         .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
         .show(ctx, |ui| {
             ui.set_min_width(760.0);

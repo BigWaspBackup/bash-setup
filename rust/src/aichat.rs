@@ -265,7 +265,6 @@ pub fn show(ctx: &egui::Context, paths: &SimbaPaths, dialog: &mut Dialog, accoun
     }
     poll_test(ctx, dialog);
 
-    let mut open = true;
     let mut clicked = Clicked {
         save: false,
         cancel: false,
@@ -274,19 +273,20 @@ pub fn show(ctx: &egui::Context, paths: &SimbaPaths, dialog: &mut Dialog, accoun
         review: false,
         delete: false,
     };
-    egui::Window::new("AI Chat")
-        .id(egui::Id::new("bash-aichat"))
-        .open(&mut open)
-        .collapsible(false)
-        .resizable(false)
-        .fade_in(false)
-        .fade_out(false)
-        .order(egui::Order::Foreground)
-        .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
-        .default_width(740.0)
-        .show(ctx, |ui| draw(ui, dialog, &mut clicked));
+    egui::Modal::new(egui::Id::new("bash-aichat")).show(ctx, |ui| {
+        ui.set_min_width(720.0);
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("AI Chat").strong());
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.button("Close").clicked() {
+                    clicked.cancel = true;
+                }
+            });
+        });
+        ui.add_space(6.0);
+        draw(ui, dialog, &mut clicked);
+    });
 
-    dialog.open = open;
     if clicked.cancel || (!dialog.open && !clicked.save) {
         let account = dialog.account.clone();
         *dialog = Dialog::load(paths, &account);

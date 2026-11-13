@@ -497,7 +497,7 @@ fn run_worker(opts: &Options, worker: Worker) {
             true
         } else {
             let body = format!(
-                "{} available:\n\n{}\n\nUpdating replaces library files that RuneLite and running scripts use.\nClose RuneLite and stop any running scripts first.",
+                "{} available:\n\n{}",
                 if opts.force_update { "Re-install / updates".to_string() } else { plural(pending.len(), "update") },
                 lines.join("\n")
             );
@@ -544,12 +544,7 @@ fn run_worker(opts: &Options, worker: Worker) {
             );
             if worker.ask(body, "Close and update", "Skip update") {
                 worker.status(format!("Closing {}...", names.join(", ")));
-                if runelite_open
-                    || names.iter().any(|name| name.eq_ignore_ascii_case("RuneLite") || name.contains("RuneLite"))
-                {
-                    let _ = profile::close_runelite();
-                    thread::sleep(Duration::from_millis(750));
-                }
+                let runelite_closed = profile::close_runelite();
                 let remaining = locks::close_processes(&lockers, Duration::from_secs(10));
                 let files = locks::watched_files(&paths, needs_simba);
                 if !remaining.is_empty() || !locks::wait_until_unlocked(&files, Duration::from_secs(15)) {
@@ -557,7 +552,7 @@ fn run_worker(opts: &Options, worker: Worker) {
                 } else {
                     lockers.clear();
                 }
-                if needs_libs && profile::runelite_running() {
+                if needs_libs && !runelite_closed {
                     lockers.push(locks::Locker {
                         pid: 0,
                         app_name: "RuneLite".into(),

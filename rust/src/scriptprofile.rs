@@ -145,6 +145,12 @@ pub struct Editor {
     pub error: String,
 }
 
+impl Editor {
+    pub fn blocks_input(&self) -> bool {
+        self.house.is_open() || self.aichat.is_open()
+    }
+}
+
 const TASKS: [&str; 8] = [
     "Camera zoom",
     "Camera angle",
@@ -341,6 +347,9 @@ impl Editor {
         let key = agility::account_key(&label);
         let mut editor = Self::load(paths, &key, &label);
         editor.page = page;
+        if page == Page::Accounts {
+            editor.use_open_client(paths);
+        }
         editor
     }
 
@@ -462,6 +471,23 @@ impl Editor {
         true
     }
 
+    /// Select the account whose name is on the only logged-in RuneLite window.
+    fn use_open_client(&mut self, paths: &SimbaPaths) {
+        let Some(name) = logged_in_account_name() else {
+            return;
+        };
+        let Some(index) = self
+            .accounts
+            .iter()
+            .position(|account| account.name.trim().eq_ignore_ascii_case(name.trim()))
+        else {
+            return;
+        };
+        if index != self.selected {
+            self.reload_account(paths, index);
+        }
+    }
+
     pub fn save(&mut self, paths: &SimbaPaths) -> Result<(), String> {
         let key = self.account_key();
         if let Some(gear) = &mut self.gear {
@@ -571,8 +597,11 @@ pub fn show(ctx: &egui::Context, paths: &SimbaPaths, editor: &mut Editor) -> Edi
         "Accounts".into()
     };
     let mut open = true;
-    egui::Window::new(title)
+    let blocked = editor.blocks_input();
+    let logged_in = logged_in_names();
+    let shown = egui::Window::new(title)
         .id(egui::Id::new("bash-settings"))
+        .enabled(!blocked)
         .open(&mut open)
         .collapsible(false)
         .resizable(false)
@@ -585,8 +614,10 @@ pub fn show(ctx: &egui::Context, paths: &SimbaPaths, editor: &mut Editor) -> Edi
         .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
         .show(ctx, |ui| {
             ui.set_min_size(egui::vec2(SETTINGS_WIDTH, SETTINGS_MIN_HEIGHT));
-            account_picker(ui, editor, &mut switch_to);
-            page_tabs(ui, editor);
+            account_picker(ui, editor, &mut switch_to, &logged_in);
+            if page_tabs(ui, editor) {
+                editor.use_open_client(paths);
+            }
             ui.separator();
             ScrollArea::vertical()
                 .id_salt(("bash-settings-body", editor.page))
@@ -646,7 +677,7 @@ pub fn show(ctx: &egui::Context, paths: &SimbaPaths, editor: &mut Editor) -> Edi
                                 gear.ui(ui, paths, hwnd, &account);
                             }
                         }
-                        Page::Accounts => accounts_page(ui, editor, &mut switch_to, &mut reload_only),
+                        Page::Accounts => accounts_page(ui, editor, &mut switch_to, &mut reload_only, &logged_in),
                         Page::Antiban => {
                             let label = editor.selected_name();
                             let hash_name = editor
@@ -711,6 +742,11 @@ pub fn show(ctx: &egui::Context, paths: &SimbaPaths, editor: &mut Editor) -> Edi
                 });
             });
         });
+    if blocked {
+        if let Some(shown) = &shown {
+            shield_window(ctx, shown.response.layer_id);
+        }
+    }
     editor.follow_account_name();
     if !open || close_requested {
         event = confirm_close(editor, paths);
@@ -728,7 +764,7 @@ pub fn show(ctx: &egui::Context, paths: &SimbaPaths, editor: &mut Editor) -> Edi
             editor.reload_account(paths, index);
         }
     }
-    if let Some(worlds) = crate::worlds::show(ctx, &mut editor.worlds_picker) {
+    if let Some(worlds) = crate::worlds::show(ctx, &mut editor.worlds_picker, !blocked) {
         let index = editor.worlds_picker.target;
         if let Some(account) = editor.accounts.get_mut(index) {
             account.worlds = worlds;
@@ -741,7 +777,58 @@ pub fn show(ctx: &egui::Context, paths: &SimbaPaths, editor: &mut Editor) -> Edi
     event
 }
 
-fn page_tabs(ui: &mut egui::Ui, editor: &mut Editor) {
+fn logged_in_names() -> Vec<String> {
+    let mut names = Vec::new();
+    for client in crate::clients::game_clients() {
+        let name = client.account();
+        if crate::agility::account_key(&name) == "NoUserNameSelected" {
+            continue;
+        }
+        if names.iter().any(|have: &String| have.eq_ignore_ascii_case(&name)) {
+            continue;
+        }
+        names.push(name);
+    }
+    names
+}
+
+fn logged_in_account_name() -> Option<String> {
+    let mut names = logged_in_names();
+    if names.len() == 1 {
+        names.pop()
+    } else {
+        None
+    }
+}
+
+fn account_is_logged_in(name: &str, logged_in: &[String]) -> bool {
+    let name = name.trim();
+    !name.is_empty() && logged_in.iter().any(|have| have.eq_ignore_ascii_case(name))
+}
+
+fn account_list_label(name: &str, logged_in: &[String]) -> String {
+    let shown = if name.trim().is_empty() { "Unnamed".to_string() } else { name.trim().to_string() };
+    if account_is_logged_in(name, logged_in) {
+        format!("{shown} (Logged In)")
+    } else {
+        shown
+    }
+}
+
+fn shield_window(ctx: &egui::Context, window: egui::LayerId) {
+    let screen = ctx.screen_rect();
+    let shown = egui::Area::new(egui::Id::new("bash-settings-shield"))
+        .order(egui::Order::Middle)
+        .fixed_pos(screen.min)
+        .constrain(false)
+        .interactable(true)
+        .show(ctx, |ui| {
+            ui.allocate_exact_size(screen.size(), egui::Sense::click_and_drag());
+        });
+    ctx.set_sublayer(window, shown.response.layer_id);
+}
+
+fn page_tabs(ui: &mut egui::Ui, editor: &mut Editor) -> bool {
     let mut pages = Vec::new();
     let salvage = editor.run_script.as_ref().is_some_and(|script| crate::salvage::is_script(&script.name));
     if editor.course.is_some() {
@@ -782,14 +869,19 @@ fn page_tabs(ui: &mut egui::Ui, editor: &mut Editor) {
     if matches!(editor.page, Page::Birdhouse) && !show_bird {
         editor.page = Page::Accounts;
     }
+    let mut pick_client = false;
     ui.horizontal(|ui| {
         let width = ((SETTINGS_WIDTH - 16.0) / pages.len() as f32) - 4.0;
         for (page, label) in pages {
             if ui.add_sized([width, 30.0], egui::SelectableLabel::new(editor.page == page, label)).clicked() {
                 editor.page = page;
+                if page == Page::Accounts {
+                    pick_client = true;
+                }
             }
         }
     });
+    pick_client
 }
 
 fn confirm_close(editor: &mut Editor, paths: &SimbaPaths) -> EditorEvent {
@@ -808,22 +900,22 @@ fn confirm_close(editor: &mut Editor, paths: &SimbaPaths) -> EditorEvent {
     }
 }
 
-fn account_picker(ui: &mut egui::Ui, editor: &Editor, switch_to: &mut Option<usize>) {
+fn account_picker(ui: &mut egui::Ui, editor: &Editor, switch_to: &mut Option<usize>, logged_in: &[String]) {
     if editor.accounts.is_empty() {
         ui.label("Add an account on the Accounts tab. Each account keeps its own settings.");
         ui.add_space(6.0);
         return;
     }
-    let current = editor.selected_name();
+    let raw = editor.accounts.get(editor.selected).map(|account| account.name.clone()).unwrap_or_default();
+    let current = account_list_label(&raw, logged_in);
     ui.horizontal(|ui| {
         ui.label(RichText::new("Account").strong());
         ComboBox::from_id_salt("settings-account")
-            .width(280.0)
+            .width(320.0)
             .selected_text(current)
             .show_ui(ui, |ui| {
                 for index in 0..editor.accounts.len() {
-                    let name = editor.accounts[index].name.trim();
-                    let name = if name.is_empty() { "Unnamed" } else { name };
+                    let name = account_list_label(&editor.accounts[index].name, logged_in);
                     if ui.selectable_label(index == editor.selected, name).clicked() && index != editor.selected {
                         *switch_to = Some(index);
                     }
@@ -834,12 +926,12 @@ fn account_picker(ui: &mut egui::Ui, editor: &Editor, switch_to: &mut Option<usi
     ui.add_space(6.0);
 }
 
-fn accounts_page(ui: &mut egui::Ui, editor: &mut Editor, switch_to: &mut Option<usize>, reload_only: &mut Option<usize>) {
+fn accounts_page(ui: &mut egui::Ui, editor: &mut Editor, switch_to: &mut Option<usize>, reload_only: &mut Option<usize>, logged_in: &[String]) {
     ui.label("Pick an account on the left. Name, bank pin, and worlds are shared by every script.");
     ui.add_space(8.0);
     ui.horizontal_top(|ui| {
         ui.vertical(|ui| {
-            ui.set_width(230.0);
+            ui.set_width(280.0);
             ui.label(RichText::new("Accounts").strong());
             egui::Frame::group(ui.style()).show(ui, |ui| {
                 if editor.accounts.is_empty() {
@@ -847,8 +939,7 @@ fn accounts_page(ui: &mut egui::Ui, editor: &mut Editor, switch_to: &mut Option<
                 } else {
                     ScrollArea::vertical().max_height(300.0).show(ui, |ui| {
                         for index in 0..editor.accounts.len() {
-                            let name = editor.accounts[index].name.trim();
-                            let name = if name.is_empty() { "Unnamed" } else { name };
+                            let name = account_list_label(&editor.accounts[index].name, logged_in);
                             if ui.selectable_label(index == editor.selected, name).clicked() && index != editor.selected {
                                 *switch_to = Some(index);
                             }
@@ -869,8 +960,15 @@ fn accounts_page(ui: &mut egui::Ui, editor: &mut Editor, switch_to: &mut Option<
                 if ui.add_enabled(!editor.accounts.is_empty(), Button::new("Delete")).clicked() {
                     let name = editor.selected_name();
                     if crate::ui::ask_yes_no(&format!("Delete {name}?\n\nThe name, bank pin, and worlds are removed.")) {
-                        editor.accounts.remove(editor.selected);
-                        *reload_only = Some(editor.selected.min(editor.accounts.len().saturating_sub(1)));
+                        if editor.selected < editor.accounts.len() {
+                            editor.accounts.remove(editor.selected);
+                        }
+                        editor.selected = if editor.accounts.is_empty() {
+                            0
+                        } else {
+                            editor.selected.min(editor.accounts.len() - 1)
+                        };
+                        *reload_only = Some(editor.selected);
                     }
                 }
             });
@@ -892,13 +990,21 @@ fn accounts_page(ui: &mut egui::Ui, editor: &mut Editor, switch_to: &mut Option<
             }
             ui.label(RichText::new("Details").strong());
             ui.add_space(4.0);
+            if editor.selected >= editor.accounts.len() {
+                editor.selected = editor.accounts.len() - 1;
+            }
             let mut show_pin = editor.show_pin;
             let mut open_worlds = false;
             {
                 let account = &mut editor.accounts[editor.selected];
                 egui::Grid::new("account-identity").num_columns(2).spacing([12.0, 8.0]).show(ui, |ui| {
                     ui.label("Account name");
-                    ui.add(egui::TextEdit::singleline(&mut account.name).desired_width(280.0));
+                    ui.horizontal(|ui| {
+                        ui.add(egui::TextEdit::singleline(&mut account.name).desired_width(280.0));
+                        if account_is_logged_in(&account.name, logged_in) {
+                            ui.label(RichText::new("Logged In").weak());
+                        }
+                    });
                     ui.end_row();
                     ui.label("Bank pin");
                     ui.horizontal(|ui| {

@@ -2,9 +2,29 @@
 //! with per-account lines removed. The profile name comes from the install id,
 //! the same way the old launcher named it.
 
-use std::{fs, path::PathBuf, process::Command};
+use std::{
+    fs,
+    path::PathBuf,
+    process::Command,
+    thread,
+    time::{Duration, Instant},
+};
 
 use serde_json::{json, Value};
+use windows::{
+    core::PWSTR,
+    Win32::{
+        Foundation::CloseHandle,
+        System::{
+            Diagnostics::ToolHelp::{
+                CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS,
+            },
+            Threading::{
+                OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_FORMAT, PROCESS_QUERY_LIMITED_INFORMATION,
+            },
+        },
+    },
+};
 
 const PROFILE_TEMPLATE: &str = include_str!("../assets/runelite-profile.properties");
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
@@ -145,28 +165,104 @@ fn mark_active(value: &mut Value, name: &str, id: i32) -> Result<(), String> {
 }
 
 pub fn runelite_running() -> bool {
-    let mut command = Command::new("tasklist");
-    command.args(["/FI", "IMAGENAME eq RuneLite.exe", "/NH"]);
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        command.creation_flags(CREATE_NO_WINDOW);
-    }
-    command
-        .output()
-        .map(|output| String::from_utf8_lossy(&output.stdout).to_ascii_lowercase().contains("runelite.exe"))
-        .unwrap_or(false)
+    !runelite_pids().is_empty()
 }
 
+/// Force-close every RuneLite process, including child processes, and wait until
+/// none remain. Returns false when one is still alive.
 pub fn close_runelite() -> bool {
+    let deadline = Instant::now() + Duration::from_secs(12);
+    loop {
+        let pids = runelite_pids();
+        if pids.is_empty() {
+            return true;
+        }
+        for pid in pids {
+            force_kill_tree(pid);
+        }
+        thread::sleep(Duration::from_millis(300));
+        if Instant::now() >= deadline {
+            return runelite_pids().is_empty();
+        }
+    }
+}
+
+fn runelite_pids() -> Vec<u32> {
+    let mut pids = Vec::new();
+    let self_pid = std::process::id();
+    unsafe {
+        let Ok(snap) = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) else {
+            return pids;
+        };
+        let mut entry = PROCESSENTRY32W {
+            dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32,
+            ..PROCESSENTRY32W::default()
+        };
+        if Process32FirstW(snap, &mut entry).is_ok() {
+            loop {
+                let pid = entry.th32ProcessID;
+                if pid != 0 && pid != self_pid && is_runelite_process(pid, &entry.szExeFile) && !pids.contains(&pid) {
+                    pids.push(pid);
+                }
+                if Process32NextW(snap, &mut entry).is_err() {
+                    break;
+                }
+            }
+        }
+        let _ = CloseHandle(snap);
+    }
+    for client in crate::clients::game_clients() {
+        let pid = client.pid;
+        if pid != 0 && pid != self_pid && !pids.contains(&pid) {
+            pids.push(pid);
+        }
+    }
+    pids
+}
+
+fn is_runelite_process(pid: u32, exe_file: &[u16]) -> bool {
+    let name = wide_prefix(exe_file);
+    if name.eq_ignore_ascii_case("RuneLite.exe") {
+        return true;
+    }
+    let lower = name.to_ascii_lowercase();
+    if lower != "java.exe" && lower != "javaw.exe" && !lower.contains("rune") {
+        return false;
+    }
+    let path = process_image_path(pid).to_ascii_lowercase();
+    path.contains("\\runelite\\") || path.contains("runelite.exe")
+}
+
+fn wide_prefix(buf: &[u16]) -> String {
+    let end = buf.iter().position(|&unit| unit == 0).unwrap_or(buf.len());
+    String::from_utf16_lossy(&buf[..end])
+}
+
+fn process_image_path(pid: u32) -> String {
+    unsafe {
+        let Ok(handle) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) else {
+            return String::new();
+        };
+        let mut buffer = vec![0u16; 1024];
+        let mut len = buffer.len() as u32;
+        let ok = QueryFullProcessImageNameW(handle, PROCESS_NAME_FORMAT(0), PWSTR(buffer.as_mut_ptr()), &mut len).is_ok();
+        let _ = CloseHandle(handle);
+        if !ok {
+            return String::new();
+        }
+        wide_prefix(&buffer[..len as usize])
+    }
+}
+
+fn force_kill_tree(pid: u32) {
     let mut command = Command::new("taskkill");
-    command.args(["/F", "/IM", "RuneLite.exe"]);
+    command.args(["/F", "/T", "/PID", &pid.to_string()]);
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
         command.creation_flags(CREATE_NO_WINDOW);
     }
-    command.status().map(|status| status.success()).unwrap_or(false)
+    let _ = command.status();
 }
 
 /// Launcher settings files. Scaling lives here, beside the JVM and client arguments.

@@ -353,12 +353,9 @@ fn run_installation(paths: SimbaPaths, tx: ProgressSender, silent: bool) {
             return fail(&tx, format!("Close {} and run the installer again.", unique.join(", ")));
         }
         send_status(&tx, format!("Closing {}...", unique.join(", ")));
-        if runelite_open {
-            let _ = profile::close_runelite();
-            thread::sleep(Duration::from_millis(750));
-        }
+        let runelite_closed = profile::close_runelite();
         let remaining = locks::close_processes(&lockers, Duration::from_secs(10));
-        if !remaining.is_empty() || profile::runelite_running() {
+        if !remaining.is_empty() || !runelite_closed {
             let mut names: Vec<String> = remaining.iter().map(|l| l.friendly_name()).collect();
             if profile::runelite_running() {
                 names.push("RuneLite".into());

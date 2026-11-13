@@ -977,12 +977,10 @@ impl Launcher {
         )) {
             return;
         }
-        if crate::profile::runelite_running() {
-            self.status = "Closing RuneLite...".into();
-            if !crate::profile::close_runelite() || crate::profile::runelite_running() {
-                self.status = "Could not close RuneLite. Close every client, then try again.".into();
-                return;
-            }
+        self.status = "Closing RuneLite...".into();
+        if !crate::profile::close_runelite() {
+            self.status = "Could not close RuneLite. Close every client, then try again.".into();
+            return;
         }
         self.installing_lib = name.to_string();
         self.status = format!("Installing {name} {}...", spec.label);
@@ -1470,6 +1468,9 @@ impl Launcher {
         }
 
         egui::TopBottomPanel::top("bash_header").show(ctx, |ui| {
+            if self.input_blocked() {
+                ui.disable();
+            }
             ui.horizontal(|ui| {
                 chrome::show_logo(ui, &self.logo, 52.0);
                 ui.vertical(|ui| {
@@ -1557,6 +1558,9 @@ impl Launcher {
         });
 
         egui::TopBottomPanel::bottom("bash_footer").show(ctx, |ui| {
+            if self.input_blocked() {
+                ui.disable();
+            }
             ui.add_space(2.0);
             let accepted = license_accepted(&self.license_status);
             let dark = ui.visuals().dark_mode;
@@ -1666,6 +1670,9 @@ impl Launcher {
             .min_width(340.0)
             .max_width(760.0)
             .show(ctx, |ui| {
+            if self.input_blocked() {
+                ui.disable();
+            }
             ui.label(RichText::new("Category").weak());
             ui.horizontal_wrapped(|ui| {
                 ui.spacing_mut().item_spacing.x = 4.0;
@@ -1742,6 +1749,9 @@ impl Launcher {
         });
 
         egui::CentralPanel::default().show(ctx, |ui| {
+            if self.input_blocked() {
+                ui.disable();
+            }
             self.running_panel(ui);
             ui.add_space(8.0);
             ui.separator();
@@ -2145,30 +2155,32 @@ impl Launcher {
         self.profile_editor = Some(scriptprofile::Editor::for_page(&self.paths, client.as_ref(), page));
     }
 
-    /// The client to read an account name from. The chosen client wins. Otherwise
-    /// one logged-in window, or the only open client, is enough.
+    /// The client Accounts should open on. A selected client that is logged in
+    /// wins. Otherwise the only window with a visible name does.
     fn logged_in_client(&self) -> Option<ClientWindow> {
+        let named = |client: &ClientWindow| agility::account_key(&client.account()) != "NoUserNameSelected";
         if let Some(hwnd) = self.selected_hwnd {
-            if let Some(client) = self.clients.iter().find(|client| client.hwnd == hwnd) {
+            if let Some(client) = self.clients.iter().find(|client| client.hwnd == hwnd && named(client)) {
                 return Some(client.clone());
             }
         }
-        let mut logged_in = self
-            .clients
-            .iter()
-            .filter(|client| agility::account_key(&client.account()) != "NoUserNameSelected")
-            .cloned();
-        let first = logged_in.next();
-        let second = logged_in.next();
-        if second.is_none() {
-            if let Some(client) = first {
-                return Some(client);
+        let named_clients: Vec<_> = self.clients.iter().filter(|client| named(client)).cloned().collect();
+        if named_clients.len() == 1 {
+            return named_clients.into_iter().next();
+        }
+        if let Some(hwnd) = self.selected_hwnd {
+            if let Some(client) = self.clients.iter().find(|client| client.hwnd == hwnd) {
+                return Some(client.clone());
             }
         }
         if self.clients.len() == 1 {
             return Some(self.clients[0].clone());
         }
         None
+    }
+
+    fn input_blocked(&self) -> bool {
+        self.profile_editor.as_ref().is_some_and(scriptprofile::Editor::blocks_input)
     }
 
     fn profile_window(&mut self, ctx: &egui::Context) {

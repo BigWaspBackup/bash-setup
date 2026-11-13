@@ -200,7 +200,6 @@ pub struct Dialog {
 struct Clicked {
     save: bool,
     cancel: bool,
-    garden: bool,
     read: bool,
     clear: bool,
 }
@@ -356,14 +355,33 @@ impl Dialog {
         self.selected = (center, center);
     }
 
+    /// A layout with no rooms is the garden and exit portal. That is the blank house.
+    fn ensure_default_garden(&mut self) {
+        if self.filled() == 0 && self.read_rx.is_none() {
+            self.start_garden();
+        }
+    }
+
+    fn is_default_garden(&self) -> bool {
+        let center = self.amount / 2;
+        let garden = center * self.amount + center;
+        self.cells.iter().enumerate().all(|(index, cell)| {
+            if index == garden {
+                cell.room == 2 && cell.rotation == 0 && cell.objects == vec![EXIT] && cell.portals == [0, 0, 0]
+            } else {
+                cell.room == 0
+            }
+        })
+    }
+
     fn clear_layout(&mut self) {
         for cell in &mut self.cells {
             *cell = Cell::empty();
         }
-        self.selected = (self.amount / 2, self.amount / 2);
         self.note.clear();
         self.warning.clear();
         self.menu_cell = None;
+        self.start_garden();
     }
 
     fn start_read(&mut self, paths: &SimbaPaths, hwnd: isize) {
@@ -410,23 +428,21 @@ pub fn show(ctx: &egui::Context, paths: &SimbaPaths, dialog: &mut Dialog, accoun
         return;
     }
     poll_read(ctx, dialog);
-    let mut open = true;
-    let mut clicked = Clicked { save: false, cancel: false, garden: false, read: false, clear: false };
-    egui::Window::new("House setup")
-        .id(egui::Id::new("bash-house"))
-        .open(&mut open)
-        .collapsible(false)
-        .resizable(true)
-        .fade_in(false)
-        .fade_out(false)
-        .order(egui::Order::Foreground)
-        .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
-        .default_width(920.0)
-        .show(ctx, |ui| draw(ui, dialog, &mut clicked));
-    dialog.open = open;
-    if clicked.garden {
-        dialog.start_garden();
-    }
+    dialog.ensure_default_garden();
+    let mut clicked = Clicked { save: false, cancel: false, read: false, clear: false };
+    egui::Modal::new(egui::Id::new("bash-house")).show(ctx, |ui| {
+        ui.set_min_width(880.0);
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("House setup").strong());
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.button("Close").clicked() {
+                    clicked.cancel = true;
+                }
+            });
+        });
+        ui.add_space(6.0);
+        draw(ui, dialog, &mut clicked);
+    });
     if clicked.clear {
         dialog.clear_layout();
     }
@@ -461,15 +477,6 @@ fn draw(ui: &mut egui::Ui, dialog: &mut Dialog, clicked: &mut Clicked) {
         labelled_choice(ui, "house-style", "House style", "The floor style. The pictures use the same colours the script matches.", &mut dialog.decoration, &STYLES);
     });
     ui.add_space(10.0);
-    if dialog.filled() == 0 {
-        ui.horizontal(|ui| {
-            if ui.button("Start with a garden and exit portal").clicked() {
-                clicked.garden = true;
-            }
-            crate::ui::help_tip(ui, "Puts a garden in the middle, with the portal you leave through. Add rooms around it.");
-        });
-        ui.add_space(8.0);
-    }
     ui.horizontal_top(|ui| {
         ui.vertical(|ui| {
             ui.set_width(560.0);
@@ -494,11 +501,11 @@ fn draw(ui: &mut egui::Ui, dialog: &mut Dialog, clicked: &mut Clicked) {
                     "Open the house viewer on that client, with the smallest room icons. Remote input is used to look at the client.",
                 );
                 if ui
-                    .add_enabled(dialog.filled() > 0 && !busy, egui::Button::new("Clear all"))
-                    .on_hover_text("Removes every room. Location and house style stay.")
+                    .add_enabled(!dialog.is_default_garden() && !busy, egui::Button::new("Clear all"))
+                    .on_hover_text("Removes every room and puts the garden and exit portal back. Location and house style stay.")
                     .clicked()
                     && crate::ui::ask_yes_no(
-                        "Clear every room in this house?\n\nLocation and house style stay. Press Done to save the empty layout.",
+                        "Clear every room in this house?\n\nLocation and house style stay. The garden and exit portal are put back. Press Done to save.",
                     )
                 {
                     clicked.clear = true;
@@ -1468,5 +1475,23 @@ mod tests {
         assert_eq!(loaded.extra.get("custom_flag"), Some(&json!(true)));
         assert!(dir.join("Configs").join("house").join("Hero.json").exists());
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_blank_house_is_a_garden_with_the_exit_portal() {
+        let mut dialog = Dialog::blank("Hero", 0);
+        dialog.ensure_default_garden();
+        let center = dialog.amount / 2;
+        let cell = &dialog.cells[center * dialog.amount + center];
+        assert_eq!(cell.room, 2);
+        assert_eq!(cell.rotation, 0);
+        assert_eq!(cell.objects, vec![EXIT]);
+        dialog.cells[0].room = 5;
+        dialog.clear_layout();
+        let cell = &dialog.cells[center * dialog.amount + center];
+        assert_eq!(cell.room, 2);
+        assert_eq!(cell.objects, vec![EXIT]);
+        assert_eq!(dialog.filled(), 1);
+        assert!(dialog.is_default_garden());
     }
 }
