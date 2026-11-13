@@ -1,11 +1,13 @@
 //! Shared code for `bash-setup.exe` (installer) and `BASH.exe` (bootstrapper).
 
 pub mod agility;
+pub mod aichat;
 pub mod bootstrap;
 pub mod catalog;
 pub mod clients;
 pub mod download;
 pub mod gear;
+pub mod house;
 pub mod icons;
 pub mod install;
 pub mod launcher;

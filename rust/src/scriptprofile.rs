@@ -140,6 +140,8 @@ pub struct Editor {
     show_pin: bool,
     show_webhook: bool,
     worlds_picker: crate::worlds::Picker,
+    aichat: crate::aichat::Dialog,
+    house: crate::house::Dialog,
     pub error: String,
 }
 
@@ -376,6 +378,8 @@ impl Editor {
             show_pin: false,
             show_webhook: false,
             worlds_picker: crate::worlds::Picker::default(),
+            aichat: crate::aichat::Dialog::load(paths, &settings_key),
+            house: crate::house::Dialog::load(paths, &settings_key, selected),
             error: String::new(),
         }
     }
@@ -442,6 +446,22 @@ impl Editor {
             .unwrap_or_else(|| "NoUserNameSelected".into())
     }
 
+    /// Accounts page, with this account selected and the worlds list open.
+    pub fn focus_worlds(&mut self, paths: &SimbaPaths, account: &str) -> bool {
+        self.page = Page::Accounts;
+        let name = account.trim();
+        let Some(index) = self.accounts.iter().position(|item| item.name.eq_ignore_ascii_case(name)) else {
+            return false;
+        };
+        if index != self.selected {
+            self.reload_account(paths, index);
+        }
+        self.worlds_picker.target = index;
+        let current = self.accounts[index].worlds.clone();
+        self.worlds_picker.open_with(&current);
+        true
+    }
+
     pub fn save(&mut self, paths: &SimbaPaths) -> Result<(), String> {
         let key = self.account_key();
         if let Some(gear) = &mut self.gear {
@@ -461,6 +481,8 @@ impl Editor {
             .is_some_and(|script| script.name.eq_ignore_ascii_case("Tormented Demons"));
         self.webhook.save(&paths.configs().join("BASettings.ini"), &key, ping_rare)?;
         save_hotkeys(&paths.configs().join("BASettings.ini"), &key, &self.prayer_hotkey, &self.inventory_hotkey)?;
+        self.aichat.save_for(paths, &key)?;
+        self.house.save_for(paths, &key)?;
         let index = self.selected;
         self.farm.save(&paths.configs().join("BASHFarmSettings"), index)?;
         self.bird.save(&paths.configs().join("BASHBirdHouseSettings"), index)?;
@@ -498,6 +520,12 @@ impl Editor {
         let (prayer_hotkey, inventory_hotkey) = load_hotkeys(paths, &key);
         self.prayer_hotkey = prayer_hotkey;
         self.inventory_hotkey = inventory_hotkey;
+        let keep_open = self.aichat.is_open();
+        self.aichat = crate::aichat::Dialog::load(paths, &key);
+        self.aichat.set_open(keep_open);
+        let house_open = self.house.is_open();
+        self.house = crate::house::Dialog::load(paths, &key, index);
+        self.house.set_open(house_open);
         self.selected = index;
     }
 
@@ -636,6 +664,7 @@ pub fn show(ctx: &egui::Context, paths: &SimbaPaths, editor: &mut Editor) -> Edi
                                 &mut refreshed,
                                 script_name.as_deref(),
                                 editor.script.as_mut(),
+                                &mut editor.aichat,
                             );
                             if refreshed {
                                 editor.antiban_hashed_for = Some(hash_name);
@@ -705,6 +734,10 @@ pub fn show(ctx: &egui::Context, paths: &SimbaPaths, editor: &mut Editor) -> Edi
             account.worlds = worlds;
         }
     }
+    let account = editor.account_key();
+    let house_index = editor.selected;
+    crate::aichat::show(ctx, paths, &mut editor.aichat, &account);
+    crate::house::show(ctx, paths, &mut editor.house, &account, house_index);
     event
 }
 
@@ -847,6 +880,14 @@ fn accounts_page(ui: &mut egui::Ui, editor: &mut Editor, switch_to: &mut Option<
             ui.set_min_width(620.0);
             if editor.accounts.is_empty() {
                 ui.label("Add an account to set the name, bank pin, and worlds.");
+                ui.add_space(14.0);
+                ui.label(RichText::new("House").strong());
+                ui.label(RichText::new(editor.house.status_line()).weak());
+                house_button(ui, &mut editor.house);
+                ui.add_space(14.0);
+                ui.label(RichText::new("AI Chat").strong());
+                ui.label(RichText::new(editor.aichat.status_line()).weak());
+                aichat_button(ui, &mut editor.aichat);
                 return;
             }
             ui.label(RichText::new("Details").strong());
@@ -898,8 +939,43 @@ fn accounts_page(ui: &mut egui::Ui, editor: &mut Editor, switch_to: &mut Option<
             if editor.prayer_hotkey.eq_ignore_ascii_case(&editor.inventory_hotkey) {
                 editor.inventory_hotkey = next_hotkey(&editor.prayer_hotkey);
             }
+            ui.add_space(14.0);
+            ui.label(RichText::new("House").strong());
+            ui.label(RichText::new(editor.house.status_line()).weak());
+            ui.label(RichText::new("Saved for this account. Scripts use it to walk inside the house.").weak());
+            ui.add_space(4.0);
+            house_button(ui, &mut editor.house);
+            ui.add_space(14.0);
+            ui.label(RichText::new("AI Chat").strong());
+            ui.label(RichText::new(editor.aichat.status_line()).weak());
+            ui.label(RichText::new("Saved for this account. Scripts use it when this account starts.").weak());
+            ui.add_space(4.0);
+            aichat_button(ui, &mut editor.aichat);
         });
     });
+}
+
+fn house_button(ui: &mut egui::Ui, house: &mut crate::house::Dialog) {
+    if ui
+        .add_enabled(house.has_account(), egui::Button::new("House Setup"))
+        .on_hover_text("Rooms, portals, pool, and how this account gets to the house.")
+        .clicked()
+    {
+        house.request();
+    }
+}
+
+fn aichat_button(ui: &mut egui::Ui, aichat: &mut crate::aichat::Dialog) {
+    if ui
+        .add_enabled(
+            aichat.has_account(),
+            egui::Button::new("Setup AIChat"),
+        )
+        .on_hover_text("API key, reply style, and custom instructions for this account.")
+        .clicked()
+    {
+        aichat.request();
+    }
 }
 
 fn tip_check(ui: &mut egui::Ui, value: &mut bool, label: &str, tip: &str) {
@@ -924,6 +1000,7 @@ fn antiban_page(
     refreshed: &mut bool,
     script: Option<&str>,
     mut activity: Option<&mut HashMap<String, String>>,
+    aichat: &mut crate::aichat::Dialog,
 ) {
     let chances = script.map(crate::scriptsetup::activity_chances).unwrap_or(&[]);
     for_account(ui, label);
@@ -941,6 +1018,11 @@ fn antiban_page(
             }
             *refreshed = true;
         }
+    });
+    ui.add_space(6.0);
+    ui.horizontal(|ui| {
+        aichat_button(ui, aichat);
+        ui.label(RichText::new(aichat.status_line()).weak());
     });
     ui.add_space(8.0);
     tip_check(
@@ -2032,16 +2114,39 @@ fn write_accounts(path: &std::path::Path, accounts: &[Account]) -> Result<(), St
     fs::write(path, body).map_err(|e| format!("Could not save accounts: {e}"))
 }
 
-pub fn worlds_ready(editor: &Editor) -> Result<(), String> {
-    let Some(account) = editor.accounts.get(editor.selected) else {
-        return Err("Add the account before starting.".into());
-    };
-    let any = account.worlds.split(|ch: char| ch == ',' || ch.is_whitespace()).any(|part| part.trim().parse::<i32>().is_ok());
-    if !any {
-        return Err("Add at least one world for this account. You must have worlds selected for world hopping.".into());
+pub fn account_has_worlds(paths: &SimbaPaths, account: &str) -> bool {
+    let name = account.trim();
+    if name.is_empty() || name.eq_ignore_ascii_case("NoUserNameSelected") {
+        return false;
     }
-    if account.name.trim().is_empty() {
-        return Err("The account needs a name.".into());
+    read_accounts(&paths.root.join("credentials.simba"))
+        .into_iter()
+        .any(|item| item.name.eq_ignore_ascii_case(name) && worlds_present(&item.worlds))
+}
+
+pub fn account_is_saved(paths: &SimbaPaths, account: &str) -> bool {
+    let name = account.trim();
+    if name.is_empty() || name.eq_ignore_ascii_case("NoUserNameSelected") {
+        return false;
     }
-    Ok(())
+    read_accounts(&paths.root.join("credentials.simba"))
+        .iter()
+        .any(|item| item.name.eq_ignore_ascii_case(name))
+}
+
+fn worlds_present(worlds: &str) -> bool {
+    worlds.split(|ch: char| ch == ',' || ch.is_whitespace()).any(|part| part.trim().parse::<i32>().is_ok())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::worlds_present;
+
+    #[test]
+    fn a_world_number_counts_as_a_list() {
+        assert!(worlds_present("301, 302"));
+        assert!(worlds_present("  394"));
+        assert!(!worlds_present(""));
+        assert!(!worlds_present("none"));
+    }
 }
