@@ -2060,6 +2060,13 @@ impl Launcher {
         if booked {
             self.save_play_time();
         }
+        let names: Vec<String> = self.clients.iter().map(|client| client.account()).collect();
+        let added = scriptprofile::ensure_client_accounts(&self.paths, &names);
+        if !added.is_empty() {
+            if let Some(editor) = self.profile_editor.as_mut() {
+                editor.note_detected_accounts(&added);
+            }
+        }
     }
 
     /// Add this session's new seconds onto the account's all-time total.
@@ -2235,34 +2242,6 @@ impl Launcher {
         }
     }
 
-    /// The account has no worlds. Tell the player, then open the worlds list.
-    fn prompt_for_worlds(&mut self, account: &str) {
-        let saved = scriptprofile::account_is_saved(&self.paths, account);
-        let message = if saved {
-            format!(
-                "{account} has no worlds, so the script will not start.\n\nAdd worlds for this account, press Save, then start the script again."
-            )
-        } else {
-            format!(
-                "{account} has no worlds, so the script will not start.\n\nAdd {account} on the Accounts page, add some worlds, press Save, then start the script again."
-            )
-        };
-        self.status = format!("{account} needs worlds before a script can start.");
-        chrome::show_info(&message);
-        let paths = self.paths.clone();
-        if self.profile_editor.is_none() {
-            self.open_profile(scriptprofile::Page::Accounts);
-        }
-        if let Some(editor) = self.profile_editor.as_mut() {
-            editor.error = self.status.clone();
-            if saved {
-                editor.focus_worlds(&paths, account);
-            } else {
-                editor.page = scriptprofile::Page::Accounts;
-            }
-        }
-    }
-
     /// Yes updates the script, then runs it. No runs the copy already installed.
     fn prompt_script_update(&mut self, script: &ScriptEntry) {
         let update = chrome::ask_yes_no(&format!(
@@ -2296,16 +2275,6 @@ impl Launcher {
         };
         if !self.paths.simba_exe().is_file() {
             self.status = format!("Simba was not found at {}.", self.paths.simba_exe().display());
-            return;
-        }
-        let account = self
-            .agility_account
-            .clone()
-            .filter(|name| name != "NoUserNameSelected")
-            .unwrap_or_else(|| agility::account_key(&client.account()));
-        if account != "NoUserNameSelected" && !scriptprofile::account_has_worlds(&self.paths, &account) {
-            self.agility_account = None;
-            self.prompt_for_worlds(&account);
             return;
         }
         let Some(script) = self.first_run_choice(script) else {

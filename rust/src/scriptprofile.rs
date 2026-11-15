@@ -101,6 +101,7 @@ struct Farm {
     compost: usize,
     patches: Vec<bool>,
     travel: Vec<usize>,
+    house_tp: usize,
     barb_dibber: bool,
     magic_secateurs: bool,
     lumby_elite: bool,
@@ -143,6 +144,7 @@ pub struct Editor {
     aichat: crate::aichat::Dialog,
     house: crate::house::Dialog,
     pub error: String,
+    close_prompt: bool,
 }
 
 impl Editor {
@@ -281,13 +283,24 @@ const SEEDS: &[&str] = &[
     "Tomato seed", "Watermelon seed", "Wildblood seed", "Yanillian seed",
 ];
 
+const HOUSE_TELEPORT: [&str; 4] = [
+    "House Teleport Spell",
+    "House Teleport Tab",
+    "Construction Cape",
+    "Construction cape (t)",
+];
+
 fn travels() -> Vec<(&'static str, &'static str, &'static [&'static str])> {
     vec![
-        ("Weiss", "Weiss TP", &["Icy basalt"]),
-        ("Stronghold", "Stronghold TP", &["Stony basalt"]),
-        ("Ardougne", "Ardougne TP", &["Ardougne Cloak (Farm)", "Ardougne Spell", "Ardougne Tablet"]),
-        ("Falador", "Falador TP", &["Explorers Ring (Farm)", "Falador Spell", "Falador Tablet"]),
-        ("Catherby", "Catherby TP", &["Lunar Catherby", "Camelot Spell", "Camelot Tablet", "Catherby Tablet"]),
+        ("Weiss", "Weiss TP", &["Icy basalt", "Portal Nexus"]),
+        ("Stronghold", "Stronghold TP", &["Stony basalt", "Portal Nexus"]),
+        ("Ardougne", "Ardougne TP", &["Ardougne Cloak (Farm)", "Ardougne Spell", "Ardougne Tablet", "Portal Nexus"]),
+        ("Falador", "Falador TP", &["Explorers Ring (Farm)", "Falador Spell", "Falador Tablet", "Portal Nexus"]),
+        (
+            "Catherby",
+            "Catherby TP",
+            &["Lunar Catherby", "Camelot Spell", "Camelot Tablet", "Catherby Tablet", "Portal Nexus"],
+        ),
         ("Phasmatys", "Phasmatys TP", &["Ectophial"]),
         (
             "Hosidius",
@@ -297,18 +310,22 @@ fn travels() -> Vec<(&'static str, &'static str, &'static [&'static str])> {
         (
             "Ortus",
             "Ortus TP",
-            &["Hunter Guild (Hunters Cape)", "Quetzal Whistle", "Civitas Tablet", "Civitas Teleport"],
+            &["Hunter Guild (Hunters Cape)", "Quetzal Whistle", "Civitas Tablet", "Civitas Teleport", "Portal Nexus"],
         ),
-        ("Guild", "Guild TP", &["Skills Necklace", "Farming Cape", "Fairy CIR (Ardy Cloak)", "Farming Cape (t)"]),
-        ("Lumbridge tree", "Lumbridge tree TP", &["Lumbridge Spell"]),
-        ("Varrock tree", "Varrock tree TP", &["Varrock Spell"]),
+        (
+            "Guild",
+            "Guild TP",
+            &["Skills Necklace", "Farming Cape", "Fairy CIR (Ardy Cloak)", "Farming Cape (t)", "Portal Nexus"],
+        ),
+        ("Lumbridge tree", "Lumbridge tree TP", &["Lumbridge Spell", "Portal Nexus"]),
+        ("Varrock tree", "Varrock tree TP", &["Varrock Spell", "Portal Nexus"]),
         (
             "Falador tree",
             "Falador tree TP",
-            &["Ring of Wealth (Falador Park)", "Falador Spell", "Falador Tablet"],
+            &["Ring of Wealth (Falador Park)", "Falador Spell", "Falador Tablet", "Portal Nexus"],
         ),
-        ("Taverley tree", "Taverley tree TP", &["Taverley Tablet"]),
-        ("Gnome tree", "Gnome tree TP", &["Fairy CIQ (Yanille)", "Slayer Ring (Stronghold Cave)"]),
+        ("Taverley tree", "Taverley tree TP", &["Taverley Tablet", "Portal Nexus"]),
+        ("Gnome tree", "Gnome tree TP", &["Fairy CIQ (Yanille)", "Slayer Ring (Stronghold Cave)", "Portal Nexus"]),
         ("Gnome fruit", "Gnome fruit TP", &["Fairy CIQ (Yanille)", "Slayer Ring (Stronghold Cave)"]),
         ("Gnome village fruit", "Gnome village fruit TP", &["Fairy CIQ (Yanille)"]),
         ("Brimhaven fruit", "Brimhaven fruit TP", &["Brimhaven Tablet", "Fairy CKR (Tai Bwo Wannai)"]),
@@ -390,6 +407,7 @@ impl Editor {
             aichat: crate::aichat::Dialog::load(paths, &settings_key),
             house: crate::house::Dialog::load(paths, &settings_key, selected),
             error: String::new(),
+            close_prompt: false,
         }
     }
 
@@ -455,27 +473,13 @@ impl Editor {
             .unwrap_or_else(|| "NoUserNameSelected".into())
     }
 
-    /// Accounts page, with this account selected and the worlds list open.
-    pub fn focus_worlds(&mut self, paths: &SimbaPaths, account: &str) -> bool {
-        self.page = Page::Accounts;
-        let name = account.trim();
-        let Some(index) = self.accounts.iter().position(|item| item.name.eq_ignore_ascii_case(name)) else {
-            return false;
-        };
-        if index != self.selected {
-            self.reload_account(paths, index);
-        }
-        self.worlds_picker.target = index;
-        let current = self.accounts[index].worlds.clone();
-        self.worlds_picker.open_with(&current);
-        true
-    }
-
     /// Select the account whose name is on the only logged-in RuneLite window.
     fn use_open_client(&mut self, paths: &SimbaPaths) {
         let Some(name) = logged_in_account_name() else {
             return;
         };
+        let _ = ensure_client_accounts(paths, std::slice::from_ref(&name));
+        self.note_detected_accounts(std::slice::from_ref(&name));
         let Some(index) = self
             .accounts
             .iter()
@@ -485,6 +489,23 @@ impl Editor {
         };
         if index != self.selected {
             self.reload_account(paths, index);
+        }
+    }
+
+    pub fn note_detected_accounts(&mut self, names: &[String]) {
+        for name in names {
+            let name = name.trim();
+            if !account_name_ok(name) {
+                continue;
+            }
+            if self.accounts.iter().any(|account| account.name.trim().eq_ignore_ascii_case(name)) {
+                continue;
+            }
+            self.accounts.push(Account {
+                name: name.to_string(),
+                pin: String::new(),
+                worlds: String::new(),
+            });
         }
     }
 
@@ -601,7 +622,7 @@ pub fn show(ctx: &egui::Context, paths: &SimbaPaths, editor: &mut Editor) -> Edi
     let logged_in = logged_in_names();
     let shown = egui::Window::new(title)
         .id(egui::Id::new("bash-settings"))
-        .enabled(!blocked)
+        .enabled(!blocked && !editor.close_prompt)
         .open(&mut open)
         .collapsible(false)
         .resizable(false)
@@ -734,7 +755,12 @@ pub fn show(ctx: &egui::Context, paths: &SimbaPaths, editor: &mut Editor) -> Edi
                     if running {
                         let ready = editor.account_key() != "NoUserNameSelected";
                         if ui.add_enabled(ready, Button::new("Start")).clicked() {
-                            event = EditorEvent::Start;
+                            if let Some(warning) = missing_worlds_warning(editor) {
+                                editor.error = warning.clone();
+                                crate::ui::show_info(&warning);
+                            } else {
+                                event = EditorEvent::Start;
+                            }
                         }
                     } else if ui.button("Save").clicked() {
                         event = EditorEvent::Start;
@@ -748,8 +774,28 @@ pub fn show(ctx: &egui::Context, paths: &SimbaPaths, editor: &mut Editor) -> Edi
         }
     }
     editor.follow_account_name();
-    if !open || close_requested {
-        event = confirm_close(editor, paths);
+    if (!open || close_requested) && !editor.close_prompt {
+        editor.close_prompt = true;
+    }
+    if editor.close_prompt {
+        match close_prompt(ctx) {
+            CloseChoice::Wait => {}
+            CloseChoice::Cancel => editor.close_prompt = false,
+            CloseChoice::No => {
+                editor.close_prompt = false;
+                event = EditorEvent::Close;
+            }
+            CloseChoice::Yes => match editor.save(paths) {
+                Ok(()) => {
+                    editor.close_prompt = false;
+                    event = EditorEvent::CloseSaved;
+                }
+                Err(error) => {
+                    editor.error = error;
+                    editor.close_prompt = false;
+                }
+            },
+        }
     }
     if let Some(index) = switch_to {
         if let Err(error) = editor.save(paths) {
@@ -884,20 +930,37 @@ fn page_tabs(ui: &mut egui::Ui, editor: &mut Editor) -> bool {
     pick_client
 }
 
-fn confirm_close(editor: &mut Editor, paths: &SimbaPaths) -> EditorEvent {
-    match crate::ui::ask_save_changes(
-        "Do you want to save your changes before closing?\n\nYes saves and closes. No closes without saving. Cancel goes back.",
-    ) {
-        crate::ui::SaveChoice::Cancel => EditorEvent::None,
-        crate::ui::SaveChoice::No => EditorEvent::Close,
-        crate::ui::SaveChoice::Yes => match editor.save(paths) {
-            Ok(()) => EditorEvent::CloseSaved,
-            Err(error) => {
-                editor.error = error;
-                EditorEvent::None
-            }
-        },
-    }
+enum CloseChoice {
+    Wait,
+    Yes,
+    No,
+    Cancel,
+}
+
+fn close_prompt(ctx: &egui::Context) -> CloseChoice {
+    let mut choice = CloseChoice::Wait;
+    egui::Modal::new(egui::Id::new("bash-save-changes")).show(ctx, |ui| {
+        ui.set_min_width(420.0);
+        ui.set_max_width(420.0);
+        ui.label(RichText::new("Save changes?").strong().size(18.0));
+        ui.add_space(8.0);
+        ui.label("Do you want to save your changes before closing?");
+        ui.add_space(14.0);
+        ui.horizontal(|ui| {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.button("Yes").clicked() {
+                    choice = CloseChoice::Yes;
+                }
+                if ui.button("No").clicked() {
+                    choice = CloseChoice::No;
+                }
+                if ui.button("Cancel").clicked() {
+                    choice = CloseChoice::Cancel;
+                }
+            });
+        });
+    });
+    choice
 }
 
 fn account_picker(ui: &mut egui::Ui, editor: &Editor, switch_to: &mut Option<usize>, logged_in: &[String]) {
@@ -1016,7 +1079,7 @@ fn accounts_page(ui: &mut egui::Ui, editor: &mut Editor, switch_to: &mut Option<
                 ui.add_space(8.0);
                 ui.label("Worlds");
                 let summary = if account.worlds.trim().is_empty() {
-                    "None yet. A script will not start until this account has worlds.".to_string()
+                    "None yet.".to_string()
                 } else {
                     account.worlds.clone()
                 };
@@ -1414,12 +1477,48 @@ fn farm_page(ui: &mut egui::Ui, farm: &mut Farm, account: &str) {
         tip_heading(
             &mut columns[0],
             "Locations",
-            "Tick the patches to visit. Travel picks how to reach that location when more than one method is available.",
+            "Tick the patches to visit. Travel picks how to reach that location when more than one method is available. Portal Nexus uses the House Teleport option.",
         );
         location_grid(&mut columns[0], farm);
         columns[1].label(RichText::new("Trees and fruit trees").strong());
         columns[1].label("Coming soon");
     });
+    ui.add_space(8.0);
+    house_teleport_pick(ui, farm);
+}
+
+fn house_teleport_pick(ui: &mut egui::Ui, farm: &mut Farm) {
+    let enabled = farm_uses_portal(farm);
+    let selected = HOUSE_TELEPORT.get(farm.house_tp).copied().unwrap_or(HOUSE_TELEPORT[0]);
+    ui.horizontal(|ui| {
+        ui.add_enabled_ui(enabled, |ui| {
+            ui.label("House Teleport");
+            ComboBox::from_id_salt("farm-house-tp")
+                .width(200.0)
+                .selected_text(selected)
+                .show_ui(ui, |ui| {
+                    for (choice_index, choice) in HOUSE_TELEPORT.iter().enumerate() {
+                        ui.selectable_value(&mut farm.house_tp, choice_index, *choice);
+                    }
+                });
+        });
+        crate::ui::help_tip(
+            ui,
+            "How the script enters the house before using a portal nexus. Construction capes do not use runes or tablets. Enabled when a location is set to Portal Nexus.",
+        );
+    });
+}
+
+fn farm_uses_portal(farm: &Farm) -> bool {
+    let options = travels();
+    location_rows().iter().any(|(_, herb, flower, allot, bush, travel)| {
+        let on = patch_on(farm, *herb)
+            || patch_on(farm, *flower)
+            || patch_on(farm, *bush)
+            || allot.is_some_and(|(north, south)| patch_on(farm, Some(north)) || patch_on(farm, Some(south)));
+        let choices = options.get(*travel).map(|entry| entry.2).unwrap_or(&[]);
+        on && choices.get(farm.travel.get(*travel).copied().unwrap_or(0)).copied() == Some("Portal Nexus")
+    })
 }
 
 fn location_grid(ui: &mut egui::Ui, farm: &mut Farm) {
@@ -1439,18 +1538,7 @@ fn location_grid(ui: &mut egui::Ui, farm: &mut Farm) {
             ui.label(RichText::new("Bush").strong());
             ui.label(RichText::new("Travel").strong());
             ui.end_row();
-            let rows: &[(&str, Option<usize>, Option<usize>, Option<(usize, usize)>, Option<usize>, usize)] = &[
-                ("Weiss", Some(0), None, None, None, 0),
-                ("Stronghold", Some(1), None, None, None, 1),
-                ("Ardougne", Some(2), Some(9), Some((16, 17)), None, 2),
-                ("Falador", Some(3), Some(10), Some((18, 19)), None, 3),
-                ("Catherby", Some(4), Some(11), Some((20, 21)), None, 4),
-                ("Phasmatys", Some(5), Some(12), Some((22, 23)), None, 5),
-                ("Hosidius", Some(6), Some(13), Some((24, 25)), None, 6),
-                ("Civitas", Some(7), Some(14), Some((26, 27)), None, 7),
-                ("Guild", Some(8), Some(15), Some((28, 29)), Some(30), 8),
-            ];
-            for (name, herb, flower, allot, bush, travel) in rows {
+            for (name, herb, flower, allot, bush, travel) in location_rows() {
                 ui.label(*name);
                 patch_check(ui, farm, *herb, "", herb_on);
                 patch_check(ui, farm, *flower, "", flower_on);
@@ -1464,6 +1552,20 @@ fn location_grid(ui: &mut egui::Ui, farm: &mut Farm) {
                 ui.end_row();
             }
         });
+}
+
+fn location_rows() -> &'static [(&'static str, Option<usize>, Option<usize>, Option<(usize, usize)>, Option<usize>, usize)] {
+    &[
+        ("Weiss", Some(0), None, None, None, 0),
+        ("Stronghold", Some(1), None, None, None, 1),
+        ("Ardougne", Some(2), Some(9), Some((16, 17)), None, 2),
+        ("Falador", Some(3), Some(10), Some((18, 19)), None, 3),
+        ("Catherby", Some(4), Some(11), Some((20, 21)), None, 4),
+        ("Phasmatys", Some(5), Some(12), Some((22, 23)), None, 5),
+        ("Hosidius", Some(6), Some(13), Some((24, 25)), None, 6),
+        ("Civitas", Some(7), Some(14), Some((26, 27)), None, 7),
+        ("Guild", Some(8), Some(15), Some((28, 29)), Some(30), 8),
+    ]
 }
 
 fn patch_on(farm: &Farm, index: Option<usize>) -> bool {
@@ -1841,6 +1943,7 @@ impl Default for Farm {
             compost: 0,
             patches: vec![false; PATCHES.len()],
             travel: travels().iter().map(|_| 0).collect(),
+            house_tp: 0,
             barb_dibber: false,
             magic_secateurs: false,
             lumby_elite: false,
@@ -1874,6 +1977,7 @@ impl Farm {
         for (i, (_, key, choices)) in options.iter().enumerate() {
             farm.travel[i] = idx(&body, key, choices.len());
         }
+        farm.house_tp = idx(&body, "House TP", HOUSE_TELEPORT.len());
         farm.barb_dibber = agility::ini_bool(&body, "Barb dibber", false);
         farm.magic_secateurs = agility::ini_bool(&body, "Magic secateurs", false);
         farm.lumby_elite = agility::ini_bool(&body, "Lumby elite", false);
@@ -1911,6 +2015,7 @@ impl Farm {
         for (i, (_, key, _)) in options.iter().enumerate() {
             pairs.push(((*key).to_string(), self.travel.get(i).copied().unwrap_or(0).to_string()));
         }
+        pairs.push(("House TP".into(), self.house_tp.to_string()));
         let owned: Vec<(&str, String)> = pairs.iter().map(|(key, value)| (key.as_str(), value.clone())).collect();
         let existing = fs::read_to_string(path).unwrap_or_default();
         let text = agility::write_section(&existing, &format!("BASH Farm{index}"), &owned);
@@ -2220,24 +2325,47 @@ fn write_accounts(path: &std::path::Path, accounts: &[Account]) -> Result<(), St
     fs::write(path, body).map_err(|e| format!("Could not save accounts: {e}"))
 }
 
-pub fn account_has_worlds(paths: &SimbaPaths, account: &str) -> bool {
-    let name = account.trim();
-    if name.is_empty() || name.eq_ignore_ascii_case("NoUserNameSelected") {
-        return false;
+fn missing_worlds_warning(editor: &Editor) -> Option<String> {
+    let account = editor.accounts.get(editor.selected)?;
+    let name = account.name.trim();
+    if !account_name_ok(name) || worlds_present(&account.worlds) {
+        return None;
     }
-    read_accounts(&paths.root.join("credentials.simba"))
-        .into_iter()
-        .any(|item| item.name.eq_ignore_ascii_case(name) && worlds_present(&item.worlds))
+    Some(format!(
+        "{name} has no worlds.\n\nAdd worlds for this account on the Accounts tab, then press Start."
+    ))
 }
 
-pub fn account_is_saved(paths: &SimbaPaths, account: &str) -> bool {
-    let name = account.trim();
-    if name.is_empty() || name.eq_ignore_ascii_case("NoUserNameSelected") {
-        return false;
+fn account_name_ok(name: &str) -> bool {
+    let name = name.trim();
+    !name.is_empty() && crate::agility::account_key(name) != "NoUserNameSelected"
+}
+
+/// Add an account for each logged-in RuneLite name that does not already exist.
+/// Returns the names that were created.
+pub fn ensure_client_accounts(paths: &SimbaPaths, names: &[String]) -> Vec<String> {
+    let path = paths.root.join("credentials.simba");
+    let mut accounts = read_accounts(&path);
+    let mut added = Vec::new();
+    for name in names {
+        let name = name.trim();
+        if !account_name_ok(name) {
+            continue;
+        }
+        if accounts.iter().any(|account| account.name.trim().eq_ignore_ascii_case(name)) {
+            continue;
+        }
+        accounts.push(Account {
+            name: name.to_string(),
+            pin: String::new(),
+            worlds: String::new(),
+        });
+        added.push(name.to_string());
     }
-    read_accounts(&paths.root.join("credentials.simba"))
-        .iter()
-        .any(|item| item.name.eq_ignore_ascii_case(name))
+    if !added.is_empty() {
+        let _ = write_accounts(&path, &accounts);
+    }
+    added
 }
 
 fn worlds_present(worlds: &str) -> bool {
@@ -2246,7 +2374,7 @@ fn worlds_present(worlds: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::worlds_present;
+    use super::*;
 
     #[test]
     fn a_world_number_counts_as_a_list() {
@@ -2254,5 +2382,21 @@ mod tests {
         assert!(worlds_present("  394"));
         assert!(!worlds_present(""));
         assert!(!worlds_present("none"));
+    }
+
+    #[test]
+    fn a_new_client_name_is_saved_as_an_account() {
+        let dir = std::env::temp_dir().join(format!("bash-accounts-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let paths = SimbaPaths::new(dir.clone());
+        let added = ensure_client_accounts(&paths, &["Not logged in".into(), "Hero".into(), "Hero".into()]);
+        assert_eq!(added, vec!["Hero".to_string()]);
+        let again = ensure_client_accounts(&paths, &["hero".into(), "Mage".into()]);
+        assert_eq!(again, vec!["Mage".to_string()]);
+        let saved = read_accounts(&dir.join("credentials.simba"));
+        assert_eq!(saved.len(), 2);
+        assert!(saved.iter().any(|account| account.name == "Hero"));
+        assert!(saved.iter().any(|account| account.name == "Mage"));
+        let _ = fs::remove_dir_all(&dir);
     }
 }

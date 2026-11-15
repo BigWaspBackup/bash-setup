@@ -18,8 +18,7 @@ use windows::{
             Shell::{DefSubclassProc, SetWindowSubclass, ShellExecuteW},
             WindowsAndMessaging::{
                 EnumWindows, GetWindowTextW, GetWindowThreadProcessId, IsWindowVisible, MessageBoxW,
-                IDNO, IDYES, MB_ICONERROR, MB_ICONINFORMATION, MB_ICONQUESTION, MB_OK, MB_YESNO,
-                MB_YESNOCANCEL,
+                IDYES, MB_ICONERROR, MB_ICONINFORMATION, MB_ICONQUESTION, MB_OK, MB_YESNO,
                 MESSAGEBOX_STYLE, SW_SHOWNORMAL, WM_ENTERSIZEMOVE, WM_ERASEBKGND, WM_EXITSIZEMOVE,
                 WM_MOVING, WM_PAINT, WM_SIZING,
             },
@@ -127,6 +126,20 @@ pub fn help_tip(ui: &mut egui::Ui, tip: &str) {
         text,
     );
     let _ = response.on_hover_text(tip);
+}
+
+/// Soft gold pulse around a control that still needs a choice.
+pub fn glow(ui: &egui::Ui, response: &egui::Response) {
+    let pulse = (ui.input(|input| input.time) * 2.2).sin() * 0.5 + 0.5;
+    let alpha = (70.0 + 90.0 * pulse) as u8;
+    let color = egui::Color32::from_rgba_unmultiplied(255, 196, 64, alpha);
+    ui.painter().rect_stroke(
+        response.rect.expand(3.0),
+        4.0,
+        egui::Stroke::new(2.0_f32, color),
+        egui::StrokeKind::Outside,
+    );
+    ui.ctx().request_repaint();
 }
 
 /// Card and row fills. Dark mode keeps the current panels. Light mode uses a light panel.
@@ -329,21 +342,6 @@ pub fn show_info(message: &str) {
 
 pub fn ask_yes_no(message: &str) -> bool {
     message_box(message, MB_YESNO | MB_ICONQUESTION) == IDYES.0
-}
-
-pub enum SaveChoice {
-    Yes,
-    No,
-    Cancel,
-}
-
-/// Yes saves, No closes without saving, Cancel stays on the window.
-pub fn ask_save_changes(message: &str) -> SaveChoice {
-    match message_box(message, MB_YESNOCANCEL | MB_ICONQUESTION) {
-        result if result == IDYES.0 => SaveChoice::Yes,
-        result if result == IDNO.0 => SaveChoice::No,
-        _ => SaveChoice::Cancel,
-    }
 }
 
 pub fn open_url(url: &str) -> bool {

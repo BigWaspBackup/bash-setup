@@ -35,13 +35,23 @@ struct Question {
     changelog: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Answer {
+    /// Open the launcher and carry on.
+    Continue,
+    /// Leave the failed step and try it again.
+    Retry,
+    /// Close the window.
+    Close,
+}
+
 #[derive(Debug, Clone)]
 enum WorkerMsg {
     Status(String),
     Progress(f32),
     Ask(Question),
-    /// Something went wrong; the user may still open the launcher.
-    Error(String),
+    /// Something went wrong. `retry` adds a Retry button on that screen.
+    Error { text: String, retry: bool },
     /// A short note for the launcher status line.
     Notice(String),
     /// Updates finished. Open the launcher.
@@ -125,7 +135,7 @@ impl UpdateItem {
 
 struct Worker {
     tx: mpsc::Sender<WorkerMsg>,
-    answers: mpsc::Receiver<bool>,
+    answers: mpsc::Receiver<Answer>,
     silent: bool,
 }
 
@@ -154,13 +164,21 @@ impl Worker {
             no_label: no.to_string(),
             changelog,
         }));
-        self.answers.recv().unwrap_or(false)
+        matches!(self.answers.recv().unwrap_or(Answer::Close), Answer::Continue)
     }
 
     fn error(&self, text: impl Into<String>) {
+        self.fail(text, false);
+    }
+
+    fn error_retry(&self, text: impl Into<String>) {
+        self.fail(text, true);
+    }
+
+    fn fail(&self, text: impl Into<String>, retry: bool) {
         let text = text.into();
         log_line(&format!("ERROR {text}"));
-        let _ = self.tx.send(WorkerMsg::Error(text));
+        let _ = self.tx.send(WorkerMsg::Error { text, retry });
     }
 
     fn progress_sender(&self) -> (crate::ProgressSender, thread::JoinHandle<()>) {
@@ -207,7 +225,7 @@ fn restart_launcher(paths: &SimbaPaths, worker: &Worker) -> bool {
         }
         Err(error) => {
             worker.error(format!("Could not restart the launcher: {error}"));
-            if !worker.answers.recv().unwrap_or(false) {
+            if worker.answers.recv().unwrap_or(Answer::Close) != Answer::Continue {
                 let _ = worker.tx.send(WorkerMsg::Done);
                 return true;
             }
@@ -243,7 +261,7 @@ fn apply_launcher_update(
     worker.status("Installing the launcher update...");
     if !install::finish_self_update(paths) {
         worker.error("Could not install the launcher update.");
-        if !worker.answers.recv().unwrap_or(false) {
+        if worker.answers.recv().unwrap_or(Answer::Close) != Answer::Continue {
             let _ = worker.tx.send(WorkerMsg::Done);
             return true;
         }
@@ -577,70 +595,88 @@ fn run_worker(opts: &Options, worker: Worker) {
                 worker.status(format!("Update skipped: {} still running.", names.join(", ")));
             }
         } else {
-            let (ptx, bridge) = worker.progress_sender();
-            let total = pending.len().max(1) as f32;
-            let mut failed: Vec<String> = Vec::new();
-            for (idx, item) in pending.iter().enumerate() {
-                let p0 = 0.30 + 0.65 * (idx as f32 / total);
-                let p1 = 0.30 + 0.65 * ((idx + 1) as f32 / total);
-                worker.status(format!("Updating {}...", item.label));
-                let result = match &item.action {
-                    Action::Simba(release) => install::install_executable(
-                        client,
-                        &release.asset_url(versions::SIMBA_ASSET),
-                        &paths.simba_exe(),
-                        Some(&ptx),
-                        (p0, p1),
-                    )
-                    .map(|_| {
-                        state.simba_tag = release.tag.clone();
-                        state.simba.installed = release.version();
-                    }),
-                    Action::Package { name, zip_url, version, tag } => {
-                        install::install_package(client, &paths, name, zip_url, Some(&ptx), (p0, p1)).map(|_| {
-                            let component = if *name == paths::SRLB_DIR { &mut state.srlb } else { &mut state.bashlib };
-                            component.installed = if tag.contains("-dev") {
-                                version.clone()
-                            } else {
-                                versions::installed_lib_version(&paths.include(name)).unwrap_or(version.clone())
-                            };
-                            component.installed_tag = tag.clone();
-                            if component.track == "dev" {
-                                component.dev_tag = tag.clone();
-                            }
-                        })
+            // Retry installs only the items that failed, so a locked folder can
+            // be closed and the same update tried again.
+            let mut todo: Vec<usize> = (0..pending.len()).collect();
+            loop {
+                let (ptx, bridge) = worker.progress_sender();
+                let total = todo.len().max(1) as f32;
+                let mut failed_idx: Vec<usize> = Vec::new();
+                let mut failed: Vec<String> = Vec::new();
+                for (step, idx) in todo.iter().copied().enumerate() {
+                    let item = &pending[idx];
+                    let p0 = 0.30 + 0.65 * (step as f32 / total);
+                    let p1 = 0.30 + 0.65 * ((step + 1) as f32 / total);
+                    worker.status(format!("Updating {}...", item.label));
+                    let result = match &item.action {
+                        Action::Simba(release) => install::install_executable(
+                            client,
+                            &release.asset_url(versions::SIMBA_ASSET),
+                            &paths.simba_exe(),
+                            Some(&ptx),
+                            (p0, p1),
+                        )
+                        .map(|_| {
+                            state.simba_tag = release.tag.clone();
+                            state.simba.installed = release.version();
+                        }),
+                        Action::Package { name, zip_url, version, tag } => {
+                            install::install_package(client, &paths, name, zip_url, Some(&ptx), (p0, p1)).map(|_| {
+                                let component = if *name == paths::SRLB_DIR {
+                                    &mut state.srlb
+                                } else {
+                                    &mut state.bashlib
+                                };
+                                component.installed = if tag.contains("-dev") {
+                                    version.clone()
+                                } else {
+                                    versions::installed_lib_version(&paths.include(name)).unwrap_or(version.clone())
+                                };
+                                component.installed_tag = tag.clone();
+                                if component.track == "dev" {
+                                    component.dev_tag = tag.clone();
+                                }
+                            })
+                        }
+                        Action::Launcher => install::download_and_install_launcher(client, &paths, Some(&ptx)).map(|rev| {
+                            state.launcher.installed = rev.to_string();
+                        }),
+                    };
+                    if let Err(e) = result {
+                        log_line(&format!("{}: {e}", item.label));
+                        failed_idx.push(idx);
+                        failed.push(format!("{}: {e}", item.label));
+                    } else {
+                        updated_libraries.push(item.label.clone());
                     }
-                    Action::Launcher => install::download_and_install_launcher(client, &paths, Some(&ptx)).map(|rev| {
-                        state.launcher.installed = rev.to_string();
-                    }),
-                };
-                if let Err(e) = result {
-                    log_line(&format!("{}: {e}", item.label));
-                    failed.push(format!("{}: {e}", item.label));
-                } else {
-                    updated_libraries.push(item.label.clone());
+                    worker.progress(p1);
                 }
-                worker.progress(p1);
-            }
-            drop(ptx);
-            let _ = bridge.join();
-            state::write_library_status(&mut state, offline);
-            let _ = state.save(&paths.state_file());
+                drop(ptx);
+                let _ = bridge.join();
+                state::write_library_status(&mut state, offline);
+                let _ = state.save(&paths.state_file());
 
-            if !failed.is_empty() {
+                if failed.is_empty() {
+                    if opts.reinstall_libraries {
+                        let _ = worker.tx.send(WorkerMsg::Notice("Libraries reinstalled.".to_string()));
+                    }
+                    break;
+                }
+
                 library_failures = true;
-                worker.error(format!(
+                worker.error_retry(format!(
                     "Some updates failed:\n\n{}\n\nLog: {}",
                     failed.join("\n"),
                     log_path().display()
                 ));
-                // The UI offers "Launch anyway"; wait for the answer.
-                if !worker.answers.recv().unwrap_or(false) {
-                    let _ = worker.tx.send(WorkerMsg::Done);
-                    return;
+                match worker.answers.recv().unwrap_or(Answer::Close) {
+                    Answer::Retry => todo = failed_idx,
+                    Answer::Continue => break,
+                    Answer::Close => {
+                        let _ = worker.tx.send(WorkerMsg::Done);
+                        return;
+                    }
                 }
-            } else if opts.reinstall_libraries {
-                let _ = worker.tx.send(WorkerMsg::Notice("Libraries reinstalled.".to_string()));
             }
         }
     }
@@ -686,11 +722,13 @@ enum Phase {
 struct BashApp {
     opts: Options,
     rx: Option<mpsc::Receiver<WorkerMsg>>,
-    answer_tx: Option<mpsc::Sender<bool>>,
+    answer_tx: Option<mpsc::Sender<Answer>>,
     status: String,
     progress: f32,
-    question: Option<Question>,
-    error: Option<String>,
+        question: Option<Question>,
+        error: Option<String>,
+        /// The current error screen can try the failed updates again.
+        error_retry: bool,
     logo: Option<egui::TextureHandle>,
     done: bool,
     phase: Phase,
@@ -725,7 +763,10 @@ impl eframe::App for BashApp {
                     WorkerMsg::Status(s) => self.status = s,
                     WorkerMsg::Progress(p) => self.progress = p,
                     WorkerMsg::Ask(q) => self.question = Some(q),
-                    WorkerMsg::Error(e) => self.error = Some(e),
+                    WorkerMsg::Error { text, retry } => {
+                        self.error = Some(text);
+                        self.error_retry = retry;
+                    }
                     WorkerMsg::Notice(note) => {
                         if let Some(launcher) = &mut self.launcher {
                             launcher.set_status(note);
@@ -734,6 +775,7 @@ impl eframe::App for BashApp {
                     WorkerMsg::Ready => {
                         self.phase = Phase::Launcher;
                         self.error = None;
+                        self.error_retry = false;
                         self.question = None;
                         if let Some(launcher) = &mut self.launcher {
                             launcher.refresh_library_status();
@@ -821,15 +863,17 @@ impl eframe::App for BashApp {
                     ui.add_space(10.0);
                     ui.horizontal(|ui| {
                         if ui.add_sized([180.0, 30.0], Button::new("Open launcher anyway")).clicked() {
-                            if let Some(tx) = &self.answer_tx {
-                                let _ = tx.send(true);
+                            self.answer(Answer::Continue);
+                        }
+                        if self.error_retry {
+                            if ui.add_sized([120.0, 30.0], Button::new("Retry")).clicked() {
+                                self.progress = 0.3;
+                                self.status = "Retrying...".into();
+                                self.answer(Answer::Retry);
                             }
-                            self.error = None;
                         }
                         if ui.add_sized([140.0, 30.0], Button::new("Close")).clicked() {
-                            if let Some(tx) = &self.answer_tx {
-                                let _ = tx.send(false);
-                            }
+                            self.answer(Answer::Close);
                             self.done = true;
                         }
                     });
@@ -843,12 +887,12 @@ impl eframe::App for BashApp {
                     let yes_clicked = centered_choice(ui, &q.yes_label, &q.no_label);
                     if yes_clicked == Some(true) {
                         if let Some(tx) = &self.answer_tx {
-                            let _ = tx.send(true);
+                            let _ = tx.send(Answer::Continue);
                         }
                         self.question = None;
                     } else if yes_clicked == Some(false) {
                         if let Some(tx) = &self.answer_tx {
-                            let _ = tx.send(false);
+                            let _ = tx.send(Answer::Close);
                         }
                         self.question = None;
                     }
@@ -887,6 +931,16 @@ impl Drop for BashApp {
 }
 
 impl BashApp {
+    fn answer(&mut self, answer: Answer) {
+        if let Some(tx) = &self.answer_tx {
+            let _ = tx.send(answer);
+        }
+        if answer != Answer::Close {
+            self.error = None;
+            self.error_retry = false;
+        }
+    }
+
     fn begin_check(&mut self, force_update: bool, reinstall_libraries: bool, check_updates: bool) {
         let mut opts = self.opts.clone();
         opts.force_update = force_update;
@@ -896,7 +950,7 @@ impl BashApp {
         opts.no_launch = false;
         opts.silent = false;
         let (tx, rx) = mpsc::channel::<WorkerMsg>();
-        let (answer_tx, answer_rx) = mpsc::channel::<bool>();
+        let (answer_tx, answer_rx) = mpsc::channel::<Answer>();
         let worker = Worker { tx, answers: answer_rx, silent: false };
         thread::spawn(move || run_worker(&opts, worker));
         self.rx = Some(rx);
@@ -909,6 +963,7 @@ impl BashApp {
         self.progress = 0.0;
         self.question = None;
         self.error = None;
+        self.error_retry = false;
         self.done = false;
         self.prompt_sized = false;
         self.phase = Phase::Check;
@@ -1007,7 +1062,7 @@ pub fn run() {
         return;
     }
     let (tx, rx) = mpsc::channel::<WorkerMsg>();
-    let (answer_tx, answer_rx) = mpsc::channel::<bool>();
+    let (answer_tx, answer_rx) = mpsc::channel::<Answer>();
     let worker = Worker { tx, answers: answer_rx, silent: opts.silent };
 
     if opts.silent {
@@ -1028,6 +1083,7 @@ pub fn run() {
         progress: 0.0,
         question: None,
         error: None,
+        error_retry: false,
         logo: None,
         done: false,
         phase: Phase::Check,

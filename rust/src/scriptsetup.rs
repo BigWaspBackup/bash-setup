@@ -335,14 +335,17 @@ fn choose_index_tip(
     }
     field_label(ui, label, tip, true);
     let shown = options[index].to_string();
-    ComboBox::from_id_salt(salt)
+    let response = ComboBox::from_id_salt(salt)
         .width(360.0)
-        .selected_text(shown)
+        .selected_text(&shown)
         .show_ui(ui, |ui| {
             for (item, option) in options.iter().enumerate() {
                 ui.selectable_value(&mut index, item, *option);
             }
         });
+    if shown == "Select" {
+        crate::ui::glow(ui, &response.response);
+    }
     values.insert(key.to_string(), index.to_string());
 }
 

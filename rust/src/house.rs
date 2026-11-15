@@ -1,6 +1,6 @@
 //! Per-account player-owned house layout. Writes `Configs/house/{account}.json`, the file `THouseLoader` reads.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{Read, Write};
 use std::path::PathBuf;
@@ -117,10 +117,11 @@ const LECTERNS: [&str; 9] = [
 const CHAPEL_ALTARS: [&str; 8] = ["None", "Oak", "Teak", "Cloth", "Mahogany", "Limestone", "Marble", "Gilded"];
 const POOLS: [&str; 6] = ["None", "Restoration", "Revitalisation", "Rejuvenation", "Fancy rejuvenation", "Ornate rejuvenation"];
 const GARDEN_TELEPORTS: [&str; 5] = ["None", "Spirit tree", "Obelisk", "Fairy ring", "Spirit tree and fairy ring"];
-const BOXES: [&str; 4] = ["None", "Basic", "Fancy", "Ornate"];
+const BOXES: [&str; 4] = ["No", "Basic", "Fancy", "Ornate"];
 const SPELL_ALTARS: [&str; 5] = ["None", "Ancient", "Lunar", "Dark", "Occult"];
-const AMULETS: [&str; 3] = ["None", "Xeric's talisman", "Digsite pendant"];
 const YES_NO: [&str; 2] = ["No", "Yes"];
+const CHOOSE_YES_NO: [&str; 3] = ["Select", "Yes", "No"];
+const AMULETS: [&str; 3] = ["None", "Xeric's talisman", "Digsite pendant"];
 const TROPHIES: [&str; 3] = ["None", "Amulet of glory", "Mythical cape"];
 
 const EXIT: u8 = 0;
@@ -195,6 +196,10 @@ pub struct Dialog {
     read_rx: Option<Receiver<String>>,
     /// House coordinate captured when a square was right-clicked.
     menu_cell: Option<(usize, usize)>,
+    /// Square to scroll into view after the save warning is clicked.
+    reveal: Option<(usize, usize)>,
+    /// Explicit No for Portal Nexus Built and Jewellery box. Missing means Select.
+    answers: HashSet<String>,
 }
 
 struct Clicked {
@@ -247,8 +252,19 @@ impl Dialog {
                 Err(message) => dialog.error = message,
             }
         }
+        let had_answers = map.contains_key("answers");
+        if let Some(Value::Array(list)) = map.remove("answers") {
+            for item in list {
+                if let Some(text) = item.as_str() {
+                    dialog.answers.insert(text.to_string());
+                }
+            }
+        }
         dialog.extra = map;
         dialog.selected = dialog.first_room();
+        if !had_answers {
+            dialog.seal_saved_choices();
+        }
         dialog
     }
 
@@ -273,6 +289,8 @@ impl Dialog {
             tiles: HashMap::new(),
             read_rx: None,
             menu_cell: None,
+            reveal: None,
+            answers: HashSet::new(),
         }
     }
 
@@ -318,10 +336,16 @@ impl Dialog {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).map_err(|error| format!("Could not create the house folder: {error}"))?;
         }
+        if let Some(gap) = next_gap(self) {
+            return Err(gap.message());
+        }
         let mut map = self.extra.clone();
         map.insert("size".into(), json!(self.size));
         map.insert("amount".into(), json!(self.amount as i64));
         map.insert("teleport".into(), json!(self.teleport as i64));
+        let mut answers: Vec<String> = self.answers.iter().cloned().collect();
+        answers.sort();
+        map.insert("answers".into(), json!(answers));
         map.insert("layout".into(), json!(encode_layout(self)));
         let text = serde_json::to_string_pretty(&Value::Object(map)).map_err(|error| format!("Could not write house settings: {error}"))?;
         fs::write(path, format!("{text}\n")).map_err(|error| format!("Could not save house settings: {error}"))
@@ -346,6 +370,11 @@ impl Dialog {
         let (x, y) = self.selected;
         let index = y * self.amount + x;
         &mut self.cells[index]
+    }
+
+    fn cell(&self) -> &Cell {
+        let (x, y) = self.selected;
+        &self.cells[y * self.amount + x]
     }
 
     fn start_garden(&mut self) {
@@ -378,10 +407,28 @@ impl Dialog {
         for cell in &mut self.cells {
             *cell = Cell::empty();
         }
+        self.answers.clear();
         self.note.clear();
         self.warning.clear();
         self.menu_cell = None;
         self.start_garden();
+    }
+
+    /// Older files stored No as "nothing built". Keep those answers so opening one does not block Done.
+    fn seal_saved_choices(&mut self) {
+        let amount = self.amount;
+        let mut keys = Vec::new();
+        for y in 0..amount {
+            for x in 0..amount {
+                let cell = &self.cells[y * amount + x];
+                for (id, _label, present) in room_settings(cell) {
+                    if !present {
+                        keys.push(format!("{x},{y}:{id}"));
+                    }
+                }
+            }
+        }
+        self.answers.extend(keys);
     }
 
     fn start_read(&mut self, paths: &SimbaPaths, hwnd: isize) {
@@ -468,7 +515,6 @@ pub fn show(ctx: &egui::Context, paths: &SimbaPaths, dialog: &mut Dialog, accoun
 
 fn draw(ui: &mut egui::Ui, dialog: &mut Dialog, clicked: &mut Clicked) {
     ui.set_min_width(880.0);
-    ui.label(RichText::new("Lay out this account's house so scripts can walk to the portal, pool, nexus, and other rooms.").weak());
     ui.label(RichText::new(format!("Saved for {}.", dialog.account.trim())).weak());
     ui.add_space(8.0);
     ui.horizontal(|ui| {
@@ -498,7 +544,7 @@ fn draw(ui: &mut egui::Ui, dialog: &mut Dialog, clicked: &mut Clicked) {
                 }
                 crate::ui::help_tip(
                     ui,
-                    "Open the house viewer on that client, with the smallest room icons. Remote input is used to look at the client.",
+                    "Open the house viewer on that client. Remote input is used to look at the client.",
                 );
                 if ui
                     .add_enabled(!dialog.is_default_garden() && !busy, egui::Button::new("Clear all"))
@@ -511,6 +557,7 @@ fn draw(ui: &mut egui::Ui, dialog: &mut Dialog, clicked: &mut Clicked) {
                     clicked.clear = true;
                 }
             });
+            ui.label(RichText::new("Ensure you are inside your house with the house layout screen open.").weak());
             if !ready {
                 ui.label(RichText::new("Log into this account in RuneLite to read the house.").weak());
             }
@@ -536,14 +583,27 @@ fn draw(ui: &mut egui::Ui, dialog: &mut Dialog, clicked: &mut Clicked) {
         ui.add_space(6.0);
         ui.label(RichText::new(&dialog.warning).color(egui::Color32::from_rgb(210, 170, 90)));
     }
+    let gap = next_gap(dialog);
     ui.add_space(8.0);
     ui.separator();
+    if let Some(gap) = &gap {
+        ui.add_space(6.0);
+        let text = RichText::new(gap.message()).color(egui::Color32::from_rgb(210, 170, 90)).underline();
+        let response = ui.add(egui::Label::new(text).sense(egui::Sense::click()));
+        response.clone().on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text("Shows this room.");
+        if response.clicked() {
+            dialog.selected = (gap.x, gap.y);
+            dialog.reveal = Some((gap.x, gap.y));
+        }
+    }
     ui.horizontal(|ui| {
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if ui.button("Cancel").clicked() {
                 clicked.cancel = true;
             }
-            if ui.button("Done").on_hover_text("Saves this account's house.").clicked() {
+            let hint = gap.as_ref().map(Gap::message).unwrap_or_else(|| "Saves this account's house.".to_string());
+            let done = ui.add_enabled(gap.is_none(), egui::Button::new("Done")).on_hover_text(hint);
+            if done.clicked() {
                 clicked.save = true;
             }
         });
@@ -594,15 +654,23 @@ fn draw_grid(ui: &mut egui::Ui, dialog: &mut Dialog) {
                             ui.set_min_width(180.0);
                             for (index, name) in ROOMS.iter().enumerate() {
                                 if ui.selectable_label(current == index, *name).clicked() {
-                                    if let Some(cell) = dialog.cells.get_mut(cy * amount + cx) {
-                                        assign_room(cell, index as u8);
-                                    }
+                            let changed = dialog.cells.get(cy * amount + cx).is_some_and(|cell| cell.room != index as u8);
+                            if let Some(cell) = dialog.cells.get_mut(cy * amount + cx) {
+                                assign_room(cell, index as u8);
+                            }
+                            if changed {
+                                forget_answers(&mut dialog.answers, cx, cy);
+                            }
                                     dialog.selected = (cx, cy);
                                     dialog.menu_cell = None;
                                     ui.close_menu();
                                 }
                             }
                         });
+                        if dialog.reveal == Some((x, y)) {
+                            response.scroll_to_me(Some(egui::Align::Center));
+                            dialog.reveal = None;
+                        }
                         if response.clicked() {
                             dialog.selected = (x, y);
                         }
@@ -621,7 +689,9 @@ fn draw_room(ui: &mut egui::Ui, dialog: &mut Dialog) {
     ui.add_space(6.0);
     let room = dialog.cell_mut().room as usize;
     if let Some(picked) = choice(ui, "house-room", "Room", &ROOMS, room) {
+        let (x, y) = dialog.selected;
         assign_room(dialog.cell_mut(), picked as u8);
+        forget_answers(&mut dialog.answers, x, y);
     }
     let room = dialog.cell_mut().room;
     ui.add_space(6.0);
@@ -663,9 +733,9 @@ fn draw_room(ui: &mut egui::Ui, dialog: &mut Dialog) {
             ui.add_space(4.0);
             span_choice(ui, "house-garden-teleport", "Teleport", &GARDEN_TELEPORTS, dialog.cell_mut(), SPIRIT_TREE, SPIRITUAL);
         }
-        21 => nexus(ui, dialog.cell_mut()),
+        21 => nexus(ui, dialog),
         22 => {
-            span_choice(ui, "house-box", "Jewellery box", &BOXES, dialog.cell_mut(), BASIC_BOX, ORNATE_BOX);
+            jewellery_box(ui, dialog);
             ui.add_space(4.0);
             span_choice(ui, "house-spell-altar", "Altar", &SPELL_ALTARS, dialog.cell_mut(), ANCIENT, OCCULT);
             ui.add_space(4.0);
@@ -678,7 +748,9 @@ fn draw_room(ui: &mut egui::Ui, dialog: &mut Dialog) {
     if room != 0 {
         ui.add_space(10.0);
         if ui.button("Clear this room").clicked() {
+            let (x, y) = dialog.selected;
             *dialog.cell_mut() = Cell::empty();
+            forget_answers(&mut dialog.answers, x, y);
         }
     }
 }
@@ -706,14 +778,30 @@ fn choice(ui: &mut egui::Ui, id: &str, label: &str, options: &[&str], current: u
     let mut value = current.min(options.len() - 1);
     let shown = options[value];
     let mut changed = false;
-    ComboBox::from_id_salt(id).width(240.0).selected_text(shown).show_ui(ui, |ui| {
+    let response = ComboBox::from_id_salt(id).width(240.0).selected_text(shown).show_ui(ui, |ui| {
         for (index, option) in options.iter().enumerate() {
             if ui.selectable_value(&mut value, index, *option).clicked() {
                 changed = true;
             }
         }
     });
+    if shown == "Select" {
+        glow_choice(ui, &response.response);
+    }
     if changed && value != current { Some(value) } else { None }
+}
+
+fn glow_choice(ui: &egui::Ui, response: &egui::Response) {
+    let pulse = (ui.input(|input| input.time) * 2.2).sin() * 0.5 + 0.5;
+    let alpha = (70.0 + 90.0 * pulse) as u8;
+    let color = egui::Color32::from_rgba_unmultiplied(255, 196, 64, alpha);
+    ui.painter().rect_stroke(
+        response.rect.expand(3.0),
+        4.0,
+        egui::Stroke::new(2.0_f32, color),
+        egui::StrokeKind::Outside,
+    );
+    ui.ctx().request_repaint();
 }
 
 fn flag_choice(ui: &mut egui::Ui, id: &str, label: &str, tip: &str, cell: &mut Cell, object: u8, replace_all: bool) {
@@ -738,8 +826,9 @@ fn flag_choice(ui: &mut egui::Ui, id: &str, label: &str, tip: &str, cell: &mut C
 
 fn span_choice(ui: &mut egui::Ui, id: &str, label: &str, options: &[&str], cell: &mut Cell, start: u8, end: u8) {
     ui.label(label);
-    let current = span_index(&cell.objects, start, end).unwrap_or(0);
-    let shown = if span_index(&cell.objects, start, end).is_none() && has_span(&cell.objects, start, end) {
+    let indexed = span_index(&cell.objects, start, end);
+    let current = indexed.unwrap_or(0);
+    let shown = if indexed.is_none() && has_span(&cell.objects, start, end) {
         "As saved"
     } else {
         options.get(current).copied().unwrap_or(options[0])
@@ -770,8 +859,6 @@ fn trophy(ui: &mut egui::Ui, cell: &mut Cell) {
         1
     } else if cell.objects.contains(&MYTH) {
         2
-    } else if cell.objects.is_empty() {
-        0
     } else {
         0
     };
@@ -821,12 +908,64 @@ fn portal_slot(ui: &mut egui::Ui, id: &str, label: &str, slot: usize, object: u8
     }
 }
 
-fn nexus(ui: &mut egui::Ui, cell: &mut Cell) {
-    amulet_slot(ui, "house-left-amulet", "Left side", 0, LEFT_AMULET, cell);
+fn nexus(ui: &mut egui::Ui, dialog: &mut Dialog) {
+    ui.horizontal(|ui| {
+        ui.label("Portal Nexus Built");
+        crate::ui::help_tip(ui, "Whether the portal nexus is built in this room.");
+    });
+    let present = dialog.cell().objects.contains(&NEXUS);
+    let current = tri_index(present, marked_no(dialog, "nexus"));
+    if let Some(picked) = choice(ui, "house-nexus", "", &CHOOSE_YES_NO, current) {
+        let cell = dialog.cell_mut();
+        cell.objects.retain(|id| *id != NEXUS);
+        if picked == 1 {
+            insert_object(&mut cell.objects, NEXUS);
+        }
+        mark_no(dialog, "nexus", picked == 2);
+    }
     ui.add_space(4.0);
-    amulet_slot(ui, "house-right-amulet", "Right side", 2, RIGHT_AMULET, cell);
+    amulet_slot(ui, "house-left-amulet", "Left side", 0, LEFT_AMULET, dialog.cell_mut());
     ui.add_space(4.0);
-    flag_choice(ui, "house-nexus", "Portal nexus", "The nexus in the middle of the room.", cell, NEXUS, false);
+    amulet_slot(ui, "house-right-amulet", "Right side", 2, RIGHT_AMULET, dialog.cell_mut());
+}
+
+fn jewellery_box(ui: &mut egui::Ui, dialog: &mut Dialog) {
+    ui.label("Jewellery box");
+    let mut options = vec!["Select"];
+    options.extend_from_slice(&BOXES);
+    let indexed = span_index(&dialog.cell().objects, BASIC_BOX, ORNATE_BOX);
+    let has = has_span(&dialog.cell().objects, BASIC_BOX, ORNATE_BOX);
+    let current = if has {
+        indexed.map(|index| index + 1).unwrap_or(0)
+    } else if marked_no(dialog, "box") {
+        1
+    } else {
+        0
+    };
+    let shown = options.get(current).copied().unwrap_or("Select");
+    let mut value = current.min(options.len() - 1);
+    let mut changed = false;
+    let response = ComboBox::from_id_salt("house-box").width(240.0).selected_text(shown).show_ui(ui, |ui| {
+        for (index, option) in options.iter().enumerate() {
+            if ui.selectable_value(&mut value, index, *option).clicked() {
+                changed = true;
+            }
+        }
+    });
+    if shown == "Select" {
+        glow_choice(ui, &response.response);
+    }
+    if changed {
+        let cell = dialog.cell_mut();
+        cell.objects.retain(|id| *id < BASIC_BOX || *id > ORNATE_BOX);
+        if value > 1 {
+            let id = BASIC_BOX + (value as u8 - 2);
+            if id <= ORNATE_BOX {
+                insert_object(&mut cell.objects, id);
+            }
+        }
+        mark_no(dialog, "box", value == 1);
+    }
 }
 
 fn amulet_slot(ui: &mut egui::Ui, id: &str, label: &str, slot: usize, object: u8, cell: &mut Cell) {
@@ -1087,12 +1226,22 @@ fn apply_client_read(dialog: &mut Dialog, text: &str) -> Result<String, String> 
     }
     let top = pair(&value, "top_left");
     let bottom = pair(&value, "bottom_right");
+    while dialog.amount < 25
+        && (!placement_fits(dialog.amount, top[0], bottom[0]) || !placement_fits(dialog.amount, top[1], bottom[1]))
+    {
+        dialog.amount += 1;
+    }
+    if dialog.cells.len() != dialog.amount * dialog.amount {
+        dialog.cells = vec![Cell::empty(); dialog.amount * dialog.amount];
+        dialog.selected = (dialog.amount / 2, dialog.amount / 2);
+    }
     let center = dialog.amount as i32 / 2;
     let offset_x = (bottom[0] - top[0] - center).abs();
     let offset_y = (bottom[1] - top[1] - center).abs();
     for cell in &mut dialog.cells {
         *cell = Cell::empty();
     }
+    dialog.answers.clear();
     let mut placed = 0usize;
     let rooms = value.get("rooms").and_then(Value::as_array).cloned().unwrap_or_default();
     for room in rooms {
@@ -1117,13 +1266,26 @@ fn apply_client_read(dialog: &mut Dialog, text: &str) -> Result<String, String> 
         return Err("Rooms were found, but they did not fit on the house grid.".into());
     }
     let noun = if placed == 1 { "room" } else { "rooms" };
-    Ok(format!("Read {placed} {noun} from the client. Set what is inside each room, then press Done."))
+    let mut note = format!("Read {placed} {noun} from the client. Set what is inside each room, then press Done.");
+    if !detail.is_empty() {
+        note.push_str("\n\n");
+        note.push_str(&detail);
+    }
+    Ok(note)
 }
 
 fn pair(value: &Value, key: &str) -> [i32; 2] {
     let Some(array) = value.get(key).and_then(Value::as_array) else { return [0, 0] };
     let at = |index: usize| array.get(index).and_then(Value::as_i64).unwrap_or(0) as i32;
     [at(0), at(1)]
+}
+
+fn placement_fits(amount: usize, top: i32, bottom: i32) -> bool {
+    let center = amount as i32 / 2;
+    let offset = (bottom - top - center).abs();
+    let start = top + offset + 1;
+    let end = bottom + offset + 1;
+    start >= 0 && end < amount as i32
 }
 
 fn view_bounds(dialog: &Dialog) -> (usize, usize, usize, usize) {
@@ -1160,6 +1322,85 @@ fn assign_room(cell: &mut Cell, room: u8) {
     cell.rotation = 0;
     cell.objects.clear();
     cell.portals = portals;
+}
+
+fn forget_answers(answers: &mut HashSet<String>, x: usize, y: usize) {
+    let prefix = format!("{x},{y}:");
+    answers.retain(|key| !key.starts_with(&prefix));
+}
+
+fn answer_key(x: usize, y: usize, question: &str) -> String {
+    format!("{x},{y}:{question}")
+}
+
+fn marked_no(dialog: &Dialog, question: &str) -> bool {
+    let (x, y) = dialog.selected;
+    dialog.answers.contains(&answer_key(x, y, question))
+}
+
+fn mark_no(dialog: &mut Dialog, question: &str, no: bool) {
+    let (x, y) = dialog.selected;
+    let key = answer_key(x, y, question);
+    if no {
+        dialog.answers.insert(key);
+    } else {
+        dialog.answers.remove(&key);
+    }
+}
+
+fn tri_index(present: bool, no: bool) -> usize {
+    if present { 1 } else if no { 2 } else { 0 }
+}
+
+#[derive(Clone, Copy)]
+struct Gap {
+    x: usize,
+    y: usize,
+    room: &'static str,
+    setting: &'static str,
+    remaining: usize,
+}
+
+impl Gap {
+    fn message(&self) -> String {
+        let mut text = format!("Cannot save until {} is selected in your {} room.", self.setting, self.room);
+        if self.remaining > 1 {
+            text.push_str(&format!(" {} choices left.", self.remaining));
+        }
+        text
+    }
+}
+
+fn room_settings(cell: &Cell) -> Vec<(&'static str, &'static str, bool)> {
+    match cell.room {
+        21 => vec![("nexus", "Portal Nexus Built", cell.objects.contains(&NEXUS))],
+        22 => vec![("box", "Jewellery box", has_span(&cell.objects, BASIC_BOX, ORNATE_BOX))],
+        _ => Vec::new(),
+    }
+}
+
+fn next_gap(dialog: &Dialog) -> Option<Gap> {
+    let mut found = None;
+    let mut remaining = 0usize;
+    for y in 0..dialog.amount {
+        for x in 0..dialog.amount {
+            let cell = &dialog.cells[y * dialog.amount + x];
+            for (id, label, present) in room_settings(cell) {
+                if present || dialog.answers.contains(&answer_key(x, y, id)) {
+                    continue;
+                }
+                remaining += 1;
+                if found.is_none() {
+                    let room = ROOMS.get(cell.room as usize).copied().unwrap_or("room");
+                    found = Some(Gap { x, y, room, setting: label, remaining: 0 });
+                }
+            }
+        }
+    }
+    found.map(|mut gap| {
+        gap.remaining = remaining;
+        gap
+    })
 }
 
 /// Xeric's talisman and the Digsite pendant sit on the two lower icons.
@@ -1424,6 +1665,15 @@ mod tests {
     }
 
     #[test]
+    fn a_wide_house_grows_the_grid_until_every_room_fits() {
+        let mut dialog = Dialog::blank("Hero", 0);
+        let text = r#"{"status":"ok","detail":"","top_left":[0,0],"bottom_right":[15,2],"rooms":[{"room":2,"x":0,"y":0,"rotation":0},{"room":3,"x":15,"y":2,"rotation":1}]}"#;
+        apply_client_read(&mut dialog, text).unwrap();
+        assert!(dialog.amount > 13);
+        assert_eq!(dialog.cells.iter().filter(|cell| cell.room != 0).count(), 2);
+    }
+
+    #[test]
     fn reads_simba_compressed_text() {
         let text = simba_decompress("CwAAAHic80jNyclXyMgvLU4FABh4BDk=").unwrap();
         assert_eq!(text, "Hello house");
@@ -1469,9 +1719,11 @@ mod tests {
         let mut dialog = Dialog::blank("Hero", 2);
         dialog.extra.insert("custom_flag".into(), json!(true));
         dialog.cells[6 * 13 + 6].room = 2;
+        dialog.answers.insert("6,6:exit".into());
         dialog.save(&paths).unwrap();
         let loaded = Dialog::load(&paths, "Hero", 2);
         assert_eq!(loaded.cells[6 * 13 + 6].room, 2);
+        assert!(loaded.answers.contains("6,6:exit"));
         assert_eq!(loaded.extra.get("custom_flag"), Some(&json!(true)));
         assert!(dir.join("Configs").join("house").join("Hero.json").exists());
         let _ = fs::remove_dir_all(&dir);
@@ -1493,5 +1745,37 @@ mod tests {
         assert_eq!(cell.objects, vec![EXIT]);
         assert_eq!(dialog.filled(), 1);
         assert!(dialog.is_default_garden());
+    }
+
+    #[test]
+    fn a_new_room_stays_on_select_until_it_is_answered() {
+        let mut dialog = Dialog::blank("Hero", 0);
+        let x = 4;
+        let y = 4;
+        assign_room(&mut dialog.cells[y * dialog.amount + x], PORTAL_NEXUS);
+        let gap = next_gap(&dialog).unwrap();
+        assert_eq!(gap.setting, "Portal Nexus Built");
+        assert!(gap.message().starts_with("Cannot save until Portal Nexus Built is selected in your Portal nexus room."));
+        dialog.answers.insert(format!("{x},{y}:nexus"));
+        assert!(next_gap(&dialog).is_none());
+
+        assign_room(&mut dialog.cells[y * dialog.amount + x], 5);
+        forget_answers(&mut dialog.answers, x, y);
+        assert!(next_gap(&dialog).is_none());
+
+        assign_room(&mut dialog.cells[y * dialog.amount + x], 22);
+        let gap = next_gap(&dialog).unwrap();
+        assert_eq!(gap.setting, "Jewellery box");
+        dialog.cells[y * dialog.amount + x].objects.push(ORNATE_BOX);
+        assert!(next_gap(&dialog).is_none());
+    }
+
+    #[test]
+    fn an_older_house_keeps_its_saved_no_answers() {
+        let mut dialog = Dialog::blank("Hero", 0);
+        dialog.cells[0].room = PORTAL_NEXUS;
+        dialog.seal_saved_choices();
+        assert!(next_gap(&dialog).is_none());
+        assert!(dialog.answers.contains("0,0:nexus"));
     }
 }
