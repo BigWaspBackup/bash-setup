@@ -303,6 +303,10 @@ impl Dialog {
         !name.is_empty() && !name.eq_ignore_ascii_case("NoUserNameSelected")
     }
 
+    pub fn is_setup(&self) -> bool {
+        self.filled() > 0
+    }
+
     pub fn status_line(&self) -> String {
         if !self.has_account() {
             return "Add an account to set up the house.".into();

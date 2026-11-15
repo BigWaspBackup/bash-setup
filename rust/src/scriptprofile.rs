@@ -758,6 +758,9 @@ pub fn show(ctx: &egui::Context, paths: &SimbaPaths, editor: &mut Editor) -> Edi
                             if let Some(warning) = missing_worlds_warning(editor) {
                                 editor.error = warning.clone();
                                 crate::ui::show_info(&warning);
+                            } else if let Some(warning) = missing_house_warning(editor) {
+                                editor.error = warning.clone();
+                                crate::ui::show_info(&warning);
                             } else {
                                 event = EditorEvent::Start;
                             }
@@ -2323,6 +2326,21 @@ fn write_accounts(path: &std::path::Path, accounts: &[Account]) -> Result<(), St
         fs::create_dir_all(parent).ok();
     }
     fs::write(path, body).map_err(|e| format!("Could not save accounts: {e}"))
+}
+
+fn missing_house_warning(editor: &Editor) -> Option<String> {
+    let script = editor.run_script.as_ref()?;
+    if !script.name.eq_ignore_ascii_case("Mahogany Homes") && !script.name.eq_ignore_ascii_case("AIO Mahogany Homes") {
+        return None;
+    }
+    let values = editor.script.as_ref()?;
+    let portal = ["Falador", "Ardougne", "Varrock"].iter().any(|key| {
+        values.get(*key).is_some_and(|value| value.trim().eq_ignore_ascii_case("Portal nexus"))
+    });
+    if !portal || editor.house.is_setup() {
+        return None;
+    }
+    Some("Portal nexus needs a house setup.\n\nSet up the house on the Accounts tab, then press Start.".into())
 }
 
 fn missing_worlds_warning(editor: &Editor) -> Option<String> {

@@ -4,7 +4,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use egui::{ComboBox, RichText, Ui};
+use egui::{Color32, ComboBox, RichText, Ui};
 
 use crate::agility::{ini_get, ini_section, write_section};
 use crate::shops::SHOPS;
@@ -1163,6 +1163,29 @@ fn vale_remap_decor(saved: &str, log: &str, options: &[String]) -> String {
     options.first().cloned().unwrap_or_else(|| "Fletch decor from logs".to_string())
 }
 
+const MH_TIERS: &[(&str, &str)] = &[
+    ("Beginner", "Beginner (Planks)"),
+    ("Novice", "Novice (Oak Planks)"),
+    ("Adept", "Adept (Teak Planks)"),
+    ("Expert", "Expert (Mahogany Planks)"),
+];
+
+fn mahogany_tier_label(stored: &str) -> &'static str {
+    MH_TIERS
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case(stored.trim()))
+        .map(|(_, label)| *label)
+        .unwrap_or("Adept (Teak Planks)")
+}
+
+fn mahogany_tier_stored(label: &str) -> &'static str {
+    MH_TIERS
+        .iter()
+        .find(|(_, shown)| shown.eq_ignore_ascii_case(label.trim()))
+        .map(|(name, _)| *name)
+        .unwrap_or("Adept")
+}
+
 fn rows_page(ui: &mut Ui, rows: &[Row], values: &mut HashMap<String, String>) {
     let mut shown_section = "";
     for row in rows {
@@ -1189,7 +1212,18 @@ fn rows_page(ui: &mut Ui, rows: &[Row], values: &mut HashMap<String, String>) {
                     continue;
                 }
                 let mut current = text(values, row.key);
-                if row.key == "DecorOpt" {
+                if row.key == "Contractor" && text(values, "Contact").eq_ignore_ascii_case("NPC Contact") {
+                    current = "Amy, Falador".to_string();
+                    locked_choice(ui, row.key, row.label, row.tip, &current);
+                    ui.label(
+                        RichText::new("Ensure your last NPC contact was Amy.").color(Color32::from_rgb(230, 176, 72)),
+                    );
+                } else if row.key == "Tier" && options.first().copied() == Some("Beginner") {
+                    let labels: Vec<&str> = MH_TIERS.iter().map(|(_, label)| *label).collect();
+                    let mut shown = mahogany_tier_label(&current).to_string();
+                    choose_tip(ui, row.key, row.label, row.tip, &mut shown, &labels);
+                    current = mahogany_tier_stored(&shown).to_string();
+                } else if row.key == "DecorOpt" {
                     let log = vale_log_name(values);
                     let decor = vale_decor_options(log);
                     current = vale_remap_decor(&current, log, &decor);
@@ -1373,7 +1407,7 @@ static SPECS: &[Spec] = &[
         " MH Settings",
         &["Tier", "Contact", "Count", "Contractor", "Falador", "Ardougne", "Varrock", "Hosidius", "HouseEntry"],
         &[
-            tip(choice("Tier", "Contract", &["Beginner", "Novice", "Adept", "Expert"]), "Contract tier to take from the contractors."),
+            tip(choice("Tier", "Contract", &["Beginner", "Novice", "Adept", "Expert"]), "The plank in brackets is the one that contract uses."),
             tip(choice("Contact", "Contact", &["NPC Contact", "Talk to contractor"]), "How to start or continue a contract with the contractor."),
             tip(choice("Contractor", "Contractor", &["Closest", "Random", "Amy, Falador", "Marlo, Varrock", "Ellie, Ardougne", "Angelo, Hosidius"]), "Which contractor to use when asking for work."),
             tip(number("Count", "Contracts to finish", "50"), "Stop after this many contracts."),
